@@ -1,10 +1,8 @@
 import os
 import io
 import wave
-import socket
-import asyncio
 import requests
-from flask import Flask, request
+from flask import Flask, request, Response, stream_with_context
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -20,25 +18,19 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "Az UDP alapú központi hangfeldolgozó aktív!"
+    return "A kozponti gyors darabolt PCM hangfeldolgozo aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
-    # Megkapjuk az ESP32 helyi hálózati IP-címét a paraméterekből
-    esp32_ip = request.args.get('ip')
-    if not esp32_ip:
-        return "Hianyzik az ESP32 IP cime", 400
-
     if not GEMINI_API_KEY: 
         return "Hianyzik a Gemini kulcs", 500
-        
     try:
         pcm_data = request.data
         if not pcm_data: return "Ures hang", 400
         
-        print(f"Beérkezett mikrofonhang az ESP-ről: {len(pcm_data)} bájt.")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
 
-        # 1. Gemini 2.5 Flash lekérdezés
+        # 1. Gemini kérés
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         from google import genai
         from google.genai import types
@@ -49,7 +41,7 @@ def process_audio():
             contents=["Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, max 4-5 szoban!", types.Part.from_bytes(data=wav_data, mime_type="audio/wav")]
         )
         reply_text = response.text.strip() if response.text else "Rendben"
-        print(f"Gemini válasz: {reply_text}")
+        print(f"Gemini valasz: {reply_text}")
 
         # 2. TTS kérés a Google Translate API-tól
         tts_url = "https://google.com"
@@ -59,7 +51,7 @@ def process_audio():
         if tts_res.status_code == 200:
             mp3_bytes = tts_res.content
             
-            # Szoftveres, pehelysúlyú MP3 -> Lineáris PCM hullámforma átalakítás
+            # Szoftveres MP3 -> Lineáris PCM hullámforma átalakítás
             pcm_clean = bytearray()
             for i in range(0, len(mp3_bytes), 2):
                 if i+1 < len(mp3_bytes):
@@ -68,23 +60,19 @@ def process_audio():
                     pcm_clean.append(sample & 0xFF)
                     pcm_clean.append((sample >> 8) & 0xFF)
             
-            # 3. UDP STREAM INDÍTÁSA AZ INTERNETRŐL AZ OTTHONI ESP32 IP CÍMÉRE
-            print(f"Válaszhang streamelése UDP csomagokban ide: {esp32_ip}:12345 ...")
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # DARABOLT (CHUNKED) GENERÁTOR: 
+            # Kis, 1024 bájtos darabokban adjuk vissza az adatot, hogy az ESP-nek ne fogyjon el a RAM-ja
+            def generate_chunks():
+                chunk_size = 1024
+                for i in range(0, len(pcm_clean), chunk_size):
+                    yield bytes(pcm_clean[i:i+chunk_size])
             
-            # 512 bájtos darabokban (chunk) kilőjük a hangot a hálózatra, nulla RAM puffer igénnyel
-            chunk_size = 512
-            for i in range(0, len(pcm_clean), chunk_size):
-                chunk = pcm_clean[i:i+chunk_size]
-                sock.sendto(chunk, (esp32_ip, 12345))
-                import time
-                time.sleep(0.002) # Apró szünet, hogy az ESP32 I2S dma-ja fel tudja dolgozni
-                
-            print("UDP hangstream sikeresen lezárva.")
-            return "OK"
+            print(f"Darabolt hangstream inditasa az ESP32-nek, teljes meret: {len(pcm_clean)} bajt.")
+            return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
+            
         return "TTS hiba", 500
     except Exception as e:
-        print(f"Hiba: {str(e)}")
+        print(str(e))
         return "Szerver hiba", 500
 
 if __name__ == '__main__':
