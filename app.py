@@ -24,10 +24,11 @@ def index():
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY: 
-        return "Hianyzik a Gemini kulcs", 500
+        return "HIBA: Hianyzik a Gemini kulcs a Render beallitasaibol.", 200
     try:
         pcm_data = request.data
-        if not pcm_data: return "Ures hang", 400
+        if not pcm_data or len(pcm_data) < 1000: 
+            return "HIBA: Ures vagy hibas hangfajl erkezett.", 200
         
         print(f"Mikrofonhang beerkezett az ESP-ről: {len(pcm_data)} bajt.")
 
@@ -38,6 +39,7 @@ def process_audio():
         # 2. Közvetlen HTTP kérés a Gemini 2.5 Flash felé - HANG kimenetet kérve szöveg helyett!
         gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
         
+        # JAVÍTVA: A Google által elvárt hajszálpontos alsó vonalas JSON kulcsnevek (response_mime_type és speech_config)
         payload = {
             "contents": [{
                 "parts": [
@@ -45,13 +47,12 @@ def process_audio():
                     {"inlineData": {"mimeType": "audio/wav", "data": audio_base64}}
                 ]
             }],
-            # Ez a konfiguráció kényszeríti a Geminit, hogy HANGOT gyártson válaszként!
-            "generationConfig": {
-                "responseMimeType": "audio/wav",
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {
-                            "voiceName": "Puck" # Kiváló minőségű, tiszta férfi beszédhang
+            "generation_config": {
+                "response_mime_type": "audio/wav",
+                "speech_config": {
+                    "voice_config": {
+                        "prebuilt_voice_config": {
+                            "voice_name": "Puck" # Kiváló minőségű, tiszta férfi beszédhang
                         }
                     }
                 }
@@ -59,40 +60,63 @@ def process_audio():
         }
 
         print("Küldés a Google Gemini felé HANG generálásra...")
-        gemini_response = requests.post(gemini_url, json=payload, timeout=20)
+        headers = {"Content-Type": "application/json"}
+        gemini_response = requests.post(gemini_url, json=payload, headers=headers, timeout=20)
         
         if gemini_response.status_code == 200:
             res_json = gemini_response.json()
             
-            # Kikeressük a Google által visszaküldött nyers hangbájtokat a JSON struktúrából
+            # Mély, univerzális kereső a hangbájtok kinyeréséhez a JSON-ból
+            audio_bytes = None
             try:
-                base64_audio_out = res_json["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-                raw_audio_out = base64.b64decode(base64_audio_out)
-                print(f"A Gemini gyári WAV hangválasza megérkezett! Méret: {len(raw_audio_out)} bájt.")
+                def find_audio_data(d):
+                    if isinstance(d, dict):
+                        for k, v in d.items():
+                            if k == 'inlineData' and isinstance(v, dict) and 'data' in v:
+                                return base64.b64decode(v['data'])
+                            elif k == 'data' and isinstance(v, str) and len(v) > 2000:
+                                try: return base64.b64decode(v)
+                                except Exception: pass
+                            ret = find_audio_data(v)
+                            if ret: return ret
+                    elif isinstance(d, list):
+                        for item in d:
+                            ret = find_audio_data(item)
+                            if ret: return ret
+                    return None
                 
-                # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, lineáris PCM hangbájtokat kapjon
-                pcm_clean = raw_audio_out[44:] if len(raw_audio_out) > 44 else raw_audio_out
-            except Exception as e:
-                print(f"Nem sikerült kivenni a hangot a JSON-ból: {str(e)}. Nyers válasz: {res_json}")
-                return "JSON hiba", 500
+                audio_bytes = find_audio_data(res_json)
+            except Exception as json_e:
+                print(f"Hiba a JSON parsolas közben: {str(json_e)}")
 
-            # 3. DARABOLT (CHUNKED) ÁTVITEL: 
-            # 1024 bájtos darabokban (chunk) küldjük vissza a tiszta PCM hangot, hogy az ESP-nek ne fogyjon el a RAM-ja
-            def generate_chunks():
-                chunk_size = 1024
-                for i in range(0, len(pcm_clean), chunk_size):
-                    yield bytes(pcm_clean[i:i+chunk_size])
-            
-            print(f"Kristálytiszta PCM hangstream indítása az ESP32-nek... Méret: {len(pcm_clean)} bájt.")
-            return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
+            if audio_bytes:
+                print(f"A Gemini gyári WAV hangválasza sikeresen kicsomagolva! Méret: {len(audio_bytes)} bájt.")
+                # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, lineáris PCM hangbájtokat kapjon
+                pcm_clean = audio_bytes[44:] if len(audio_bytes) > 44 else audio_bytes
+                
+                # 3. DARABOLT (CHUNKED) ÁTVITEL: 
+                def generate_chunks():
+                    chunk_size = 1024
+                    for i in range(0, len(pcm_clean), chunk_size):
+                        yield bytes(pcm_clean[i:i+chunk_size])
+                
+                print(f"Kristálytiszta PCM hangstream indítása az ESP32-nek... Méret: {len(pcm_clean)} bájt.")
+                return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
+            else:
+                text_fallback = "Sikeres kapcsolat"
+                try: text_fallback = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                except Exception: pass
+                print(f"A Gemini nem adott vissza hangot. Szöveg lett helyette: {text_fallback}")
+                return f"HIBA: A Gemini nem kulldott hangot, csak szoveget: {text_fallback}", 200
             
         else:
             print(f"Google API Hiba: {gemini_response.text}")
-            return "Google API Hiba", 500
+            return f"HIBA: Google API hiba ({gemini_response.status_code}).", 200
             
     except Exception as e:
         print(f"Szerveroldali hiba: {str(e)}")
-        return "Szerver hiba", 500
+        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
+        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
