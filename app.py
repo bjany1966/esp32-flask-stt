@@ -5,8 +5,6 @@ import wave
 from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
-from gtts import gTTS
-import minimp3
 
 app = Flask(__name__)
 
@@ -51,40 +49,45 @@ def process_audio():
             
         print(f"Beérkezett mikrofonhang: {len(pcm_data)} bájt.")
 
-        # 1. PCM -> WAV konverzió a Geminihez
+        # 1. PCM -> WAV konverzió a bemenethez
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
 
-        # 2. Gemini 2.5 Flash lekérdezés
+        print("Kuldes a Gemini API-nak közvetlen HANG kimeneti kéréssel...")
+        
+        # 2. Úgy állítjuk be a Gemini-t, hogy közvetlenül AUDIO formátumban válaszoljon!
+        config = types.GenerateContentConfig(
+            response_mime_type="audio/mp3" # vagy "audio/pcm" / "audio/wav"
+        )
+        
+        # A válasznak egyből hangot kérünk a modelltől
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
+                "Valaszolj a hallott hangra tisztan magyarul, nagyon roviden, maximum 5-6 szoban!",
                 audio_part
             ]
         )
         
-        reply_text = response.text.strip() if response.text else "Sikeres kapcsolat"
-        print(f"Gemini válasza: {reply_text}")
+        # Megkeressük a Gemini által visszaküldött nyers hangbájtokat a JSON struktúrában
+        audio_bytes = None
+        try:
+            for part in response.candidates[0].content.parts:
+                if part.inline_data and part.inline_data.data:
+                    audio_bytes = base64.b64decode(part.inline_data.data)
+                    break
+        except Exception:
+            pass
 
-        # 3. TTS (Szövegből beszéd generálása magyarul)
-        tts = gTTS(text=reply_text, lang='hu', slow=False)
-        mp3_fp = io.BytesIO()
-        tts.write_to_fp(mp3_fp)
-        mp3_fp.seek(0)
-        
-        # 4. MP3 -> NYERS PCM Konverzió minimp3-mal (Nincs Linux függőség!)
-        mp3_data = mp3_fp.getvalue()
-        # A minimp3 decodolja az MP3-at nyers 16 bites PCM bájtokká
-        _, _, pcm_frames = minimp3.decode(mp3_data)
-        
-        print(f"Válaszhang átszámítva tiszta PCM bájtokká! Új méret: {len(pcm_frames)} bájt.")
-
-        # Visszaküldjük a tiszta nyers PCM bájtokat az ESP32-nek
-        return send_file(
-            io.BytesIO(pcm_frames),
-            mimetype='application/octet-stream'
-        )
+        if audio_bytes:
+            print(f"A Gemini közvetlen hangválasza megérkezett! Méret: {len(audio_bytes)} bájt.")
+            return send_file(
+                io.BytesIO(audio_bytes),
+                mimetype='application/octet-stream'
+            )
+        else:
+            print("Nem sikerült közvetlen hangot kinyerni a Gemini válaszból. Szöveges válasz: ", response.text)
+            return "HIBA: Nem erkezett hangvalasz a modelltol.", 200
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
