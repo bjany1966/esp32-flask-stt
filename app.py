@@ -40,12 +40,12 @@ def process_audio():
             clean_key = str(raw_key).replace("\n", "").replace("\r", "").strip()
             client = genai.Client(api_key=clean_key)
         else:
-            return "Hianyzik az API kulcs.", 500
+            return "HIBA: Hianyzik az API kulcs a Render beallitasaibol.", 200
 
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000:
-            return "Ures vagy hibas hangfajl.", 400
+            return "HIBA: Ures vagy hibas hangfajl erkezett.", 200
             
         print(f"Beérkezett mikrofonhang az ESP-ről: {len(pcm_data)} bájt.")
 
@@ -55,9 +55,8 @@ def process_audio():
 
         print("Küldés a Gemini API-nak... Közvetlen HANG válasz kérése.")
         
-        # JAVÍTVA: A hivatalos Google SDK szerinti helyes hang-visszaadási konfiguráció
         config = types.GenerateContentConfig(
-            response_modalities=["AUDIO"]  # Ez kényszeríti a Geminit, hogy HANG-ban válaszoljon
+            response_modalities=["AUDIO"]  # Kényszeríti a hang alapú kimenetet
         )
 
         response = client.models.generate_content(
@@ -69,16 +68,43 @@ def process_audio():
             config=config
         )
         
-        # 3. Kivesszük a beérkező nyers hangbájtokat a Google válaszából
+        # 3. Mély, univerzális és atombiztos JSON kereső a hangbájtok kinyeréséhez
         audio_bytes = None
         try:
-            # Végigpásztázzuk a válasz részeit nyers inline hangadat után kutatva
-            for part in response.candidates[0].content.parts:
-                if part.inline_data and part.inline_data.data:
-                    audio_bytes = base64.b64decode(part.inline_data.data)
-                    break
-        except Exception as e:
-            print(f"Nem sikerült kivenni a hangbájtokat: {str(e)}")
+            # Ha a válasz objektumként érkezik, átrakjuk dictionary formátumba a könnyebb keresésért
+            res_dict = response.model_dump() if hasattr(response, 'model_dump') else str(response)
+            
+            # Megpróbáljuk a standard SDK útvonalat
+            if hasattr(response, 'candidates') and response.candidates:
+                for candidate in response.candidates:
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'inline_data') and part.inline_data:
+                                if hasattr(part.inline_data, 'data') and part.inline_data.data:
+                                    audio_bytes = base64.b64decode(part.inline_data.data)
+                                    break
+                                    
+            # TARTALÉK OPTIÓ: Ha az SDK struktúra változott, kézzel vadásszuk le a 'data' kulcsot a szótárból
+            if not audio_bytes and isinstance(res_dict, dict):
+                def find_audio_data(d):
+                    if isinstance(d, dict):
+                        for k, v in d.items():
+                            if k == 'inline_data' and isinstance(v, dict) and 'data' in v:
+                                return base64.b64decode(v['data'])
+                            elif k == 'data' and isinstance(v, str) and len(v) > 1000:
+                                try: return base64.b64decode(v)
+                                except Exception: pass
+                            ret = find_audio_data(v)
+                            if ret: return ret
+                    elif isinstance(d, list):
+                        for item in d:
+                            ret = find_audio_data(item)
+                            if ret: return ret
+                    return None
+                audio_bytes = find_audio_data(res_dict)
+
+        except Exception as json_e:
+            print(f"Hiba a JSON parsolas kozben: {str(json_e)}")
 
         if audio_bytes:
             print(f"A Gemini gyári hangválasza sikeresen kicsomagolva! Méret: {len(audio_bytes)} bájt.")
@@ -90,12 +116,15 @@ def process_audio():
             
             return send_file(io.BytesIO(audio_bytes), mimetype='application/octet-stream')
         else:
-            print("A Gemini nem adott vissza hangot. Szöveges válasz lett helyette: ", response.text)
-            return "HIBA: Nem erkezett hang a modelltol.", 200
+            # Ha nem jött hang, visszaküldjük a szöveget 200 OK-val, hogy az ESP32 kiírhassa!
+            text_fallback = getattr(response, 'text', 'Ures valasz')
+            print(f"A Gemini nem adott vissza hangot. Szöveges válasz lett: {text_fallback}")
+            return f"HIBA: Nem erkezett hangadat. Szoveg: {text_fallback}", 200
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
-        return f"Szerver hiba: {str(e)}", 500
+        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
+        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
