@@ -55,15 +55,15 @@ def process_audio():
 
         print("Küldés a Gemini API-nak... Közvetlen HANG válasz kérése.")
         
-        # 2. Beállítjuk a Geminit, hogy HANG (audio) formátumban válaszoljon a szöveg helyett
+        # JAVÍTVA: A hivatalos Google SDK szerinti helyes hang-visszaadási konfiguráció
         config = types.GenerateContentConfig(
-            response_mime_type="audio/wav" # Szabványos, tömörítetlen hangot kérünk!
+            response_modalities=["AUDIO"]  # Ez kényszeríti a Geminit, hogy HANG-ban válaszoljon
         )
 
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban! A valaszod egybol hang legyen!",
+                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
                 audio_part
             ],
             config=config
@@ -72,7 +72,7 @@ def process_audio():
         # 3. Kivesszük a beérkező nyers hangbájtokat a Google válaszából
         audio_bytes = None
         try:
-            # A Google SDK-ban a part.inline_data tartalmazza a nyers bájtokat base64-ben
+            # Végigpásztázzuk a válasz részeit nyers inline hangadat után kutatva
             for part in response.candidates[0].content.parts:
                 if part.inline_data and part.inline_data.data:
                     audio_bytes = base64.b64decode(part.inline_data.data)
@@ -83,14 +83,14 @@ def process_audio():
         if audio_bytes:
             print(f"A Gemini gyári hangválasza sikeresen kicsomagolva! Méret: {len(audio_bytes)} bájt.")
             
-            # Az első 44 bájtot (a WAV fejlécet) levágjuk, hogy tiszta nyers PCM adatot kapjon az ESP32
+            # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, nyers PCM bájtokat kapjon
             if len(audio_bytes) > 44:
                 pcm_only = audio_bytes[44:]
                 return send_file(io.BytesIO(pcm_only), mimetype='application/octet-stream')
             
             return send_file(io.BytesIO(audio_bytes), mimetype='application/octet-stream')
         else:
-            print("A Gemini nem adott vissza hangot. Szöveg: ", response.text)
+            print("A Gemini nem adott vissza hangot. Szöveges válasz lett helyette: ", response.text)
             return "HIBA: Nem erkezett hang a modelltol.", 200
 
     except Exception as e:
