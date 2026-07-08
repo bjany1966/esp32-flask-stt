@@ -3,7 +3,7 @@ import io
 import wave
 import base64
 import requests
-from flask import Flask, request, Response, stream_with_context
+from flask import Flask, request, Response
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -36,14 +36,13 @@ def process_audio():
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_base64 = base64.b64encode(wav_data).decode('utf-8')
 
-        # 2. Közvetlen HTTP kérés a Gemini 2.5 Flash felé - HANG kimenetet kérve szöveg helyett!
+        # 2. HTTP POST kérés a Gemini 2.5 Flash felé
         gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
         
-        # JAVÍTVA: A Google által elvárt hajszálpontos alsó vonalas JSON kulcsnevek (response_mime_type és speech_config)
         payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Valaszolj a hallott hangra tisztan magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!"},
+                    {"text": "Valaszolj a hallott hangra tisztan magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"},
                     {"inlineData": {"mimeType": "audio/wav", "data": audio_base64}}
                 ]
             }],
@@ -52,7 +51,7 @@ def process_audio():
                 "speech_config": {
                     "voice_config": {
                         "prebuilt_voice_config": {
-                            "voice_name": "Puck" # Kiváló minőségű, tiszta férfi beszédhang
+                            "voice_name": "Puck" 
                         }
                     }
                 }
@@ -66,7 +65,6 @@ def process_audio():
         if gemini_response.status_code == 200:
             res_json = gemini_response.json()
             
-            # Mély, univerzális kereső a hangbájtok kinyeréséhez a JSON-ból
             audio_bytes = None
             try:
                 def find_audio_data(d):
@@ -90,32 +88,22 @@ def process_audio():
                 print(f"Hiba a JSON parsolas közben: {str(json_e)}")
 
             if audio_bytes:
-                print(f"A Gemini gyári WAV hangválasza sikeresen kicsomagolva! Méret: {len(audio_bytes)} bájt.")
-                # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, lineáris PCM hangbájtokat kapjon
+                # Levágjuk az első 44 bájtot (WAV fejléc), hogy tiszta PCM bájtokat kapjunk
                 pcm_clean = audio_bytes[44:] if len(audio_bytes) > 44 else audio_bytes
+                print(f"A Gemini gyári hangválasza kész! Méret: {len(pcm_clean)} bájt.")
                 
-                # 3. DARABOLT (CHUNKED) ÁTVITEL: 
-                def generate_chunks():
-                    chunk_size = 1024
-                    for i in range(0, len(pcm_clean), chunk_size):
-                        yield bytes(pcm_clean[i:i+chunk_size])
-                
-                print(f"Kristálytiszta PCM hangstream indítása az ESP32-nek... Méret: {len(pcm_clean)} bájt.")
-                return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
+                # JAVÍTVA: Fix, kényszerített Content-Length fejléc, hogy az ESP pontosan tudja, mikor kell leállnia!
+                return Response(
+                    bytes(pcm_clean),
+                    mimetype='application/octet-stream',
+                    headers={'Content-Length': str(len(pcm_clean))}
+                )
             else:
-                text_fallback = "Sikeres kapcsolat"
-                try: text_fallback = res_json["candidates"][0]["content"]["parts"][0]["text"]
-                except Exception: pass
-                print(f"A Gemini nem adott vissza hangot. Szöveg lett helyette: {text_fallback}")
-                return f"HIBA: A Gemini nem kulldott hangot, csak szoveget: {text_fallback}", 200
-            
+                return "HIBA: Nem erkezett hangadat a Google-tol.", 200
         else:
-            print(f"Google API Hiba: {gemini_response.text}")
             return f"HIBA: Google API hiba ({gemini_response.status_code}).", 200
             
     except Exception as e:
-        print(f"Szerveroldali hiba: {str(e)}")
-        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
         return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 if __name__ == '__main__':
