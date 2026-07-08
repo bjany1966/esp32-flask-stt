@@ -6,13 +6,12 @@ from google.genai import types
 
 app = Flask(__name__)
 
-# A hivatalos Google kliens inicializálása a Render környezeti változóból
-# Fontos: A Google SDK automatikusan a GEMINI_API_KEY nevű változót keresi!
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
 client = None
-if os.environ.get("GEMINI_API_KEY"):
+if GEMINI_API_KEY:
     try:
-        # Tisztítjuk a kulcsot a láthatatlan karakterektől a biztonság kedvéért
-        clean_key = str(os.environ.get("GEMINI_API_KEY")).replace("\n", "").replace("\r", "").strip()
+        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
         client = genai.Client(api_key=clean_key)
     except Exception as e:
         print(f"Kliens inditasi hiba: {str(e)}")
@@ -26,7 +25,6 @@ def process_audio():
     global client
     
     if not client:
-        # Megpróbáljuk újra betölteni, ha elsőre nem sikerült
         raw_key = os.environ.get("GEMINI_API_KEY")
         if raw_key:
             clean_key = str(raw_key).replace("\n", "").replace("\r", "").strip()
@@ -36,7 +34,6 @@ def process_audio():
             return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
 
     try:
-        # Beérkező nyers bájtok fogadása az ESP32-ről
         audio_data = request.data
         if not audio_data or len(audio_data) < 1000:
             print(f"HIBA: Tul rovid adat erkezett! Meret: {len(audio_data)} bajt.")
@@ -44,7 +41,6 @@ def process_audio():
             
         print(f"Sikeresen beerkezett a hang az ESP-rol! Meret: {len(audio_data)} bajt.")
 
-        # Hang előkészítése a hivatalos Google formátumra
         audio_part = types.Part.from_bytes(
             data=audio_data,
             mime_type="audio/pcm;rate=16000"
@@ -52,9 +48,9 @@ def process_audio():
 
         print("Kuldes a Gemini API-nak a hivatalos Google SDK-val...")
         
-        # Tartalom generálása a hivatalos és legújabb éles metódussal
+        # PONTOSÍTVA: A Google által elvárt 'models/' előtag hozzáadása a 404-es hiba ellen
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='models/gemini-1.5-flash',
             contents=[
                 "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
                 audio_part
