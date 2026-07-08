@@ -7,10 +7,15 @@ from google.genai import types
 app = Flask(__name__)
 
 # A hivatalos Google kliens inicializálása a Render környezeti változóból
-# Fontos: A kliens automatikusan a GEMINI_API_KEY nevű változót keresi!
+# Fontos: A Google SDK automatikusan a GEMINI_API_KEY nevű változót keresi!
 client = None
 if os.environ.get("GEMINI_API_KEY"):
-    client = genai.Client()
+    try:
+        # Tisztítjuk a kulcsot a láthatatlan karakterektől a biztonság kedvéért
+        clean_key = str(os.environ.get("GEMINI_API_KEY")).replace("\n", "").replace("\r", "").strip()
+        client = genai.Client(api_key=clean_key)
+    except Exception as e:
+        print(f"Kliens inditasi hiba: {str(e)}")
 
 @app.route('/')
 def index():
@@ -20,10 +25,12 @@ def index():
 def process_audio():
     global client
     
-    # Ha indításkor nem volt meg a kulcs, megpróbáljuk újra beolvasni
     if not client:
-        if os.environ.get("GEMINI_API_KEY"):
-            client = genai.Client()
+        # Megpróbáljuk újra betölteni, ha elsőre nem sikerült
+        raw_key = os.environ.get("GEMINI_API_KEY")
+        if raw_key:
+            clean_key = str(raw_key).replace("\n", "").replace("\r", "").strip()
+            client = genai.Client(api_key=clean_key)
         else:
             print("HIBA: A GEMINI_API_KEY nincs beallitva a Renderen.")
             return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
@@ -45,7 +52,7 @@ def process_audio():
 
         print("Kuldes a Gemini API-nak a hivatalos Google SDK-val...")
         
-        # Tartalom generálása a hivatalos és legújabb v1-es metódussal
+        # Tartalom generálása a hivatalos és legújabb éles metódussal
         response = client.models.generate_content(
             model='gemini-1.5-flash',
             contents=[
@@ -59,7 +66,7 @@ def process_audio():
             print(f"Sikeres Gemini valasz: {reply}")
             return reply
         else:
-            print(f"Üres válasz érkezett a Geminitől: {response}")
+            print(f"Ures valasz erkezett a Geminitol: {response}")
             return "HIBA: A Gemini valasza ures volt.", 200
 
     except Exception as e:
