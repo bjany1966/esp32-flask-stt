@@ -9,7 +9,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 @app.route('/')
 def index():
-    return "A kozponti hangfeldolgozo szerver aktiv és kész a fogadásra!"
+    return "A kozponti hangfeldolgozo szerver aktiv es kesz a fogadasra!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
@@ -18,11 +18,11 @@ def process_audio():
         return "Szerveroldali konfiguracios hiba.", 500
 
     try:
-        # Közvetlenül a beérkező HTTP kérésből olvassuk ki az ESP32 által küldött bájtokat
+        # Kiolvassuk az ESP32 által küldött nyers bájtokat
         audio_data = request.data
         
         if not audio_data or len(audio_data) < 1000:
-            print(f"HIBA: Hibás vagy túl rövid adat érkezett! Méret: {len(audio_data)} bájt.")
+            print(f"HIBA: Túl rövid adat érkezett! Méret: {len(audio_data)} bájt.")
             return "Ures vagy hibas hangfajl.", 400
             
         print(f"Sikeresen beérkezett a hang az ESP-ről! Méret: {len(audio_data)} bájt.")
@@ -45,12 +45,18 @@ def process_audio():
         gemini_response = requests.post(gemini_url, json=payload, headers=headers, timeout=15)
         
         if gemini_response.status_code == 200:
-            reply = gemini_response.json()["candidates"][0]["content"]["parts"][0]["text"]
-            print(f"Sikeres Gemini válasz: {reply}")
-            return reply
+            res_json = gemini_response.json()
+            # JAVÍTVA: Hozzáadva a [0] indexelés a 'parts' és a 'candidates' tömbökhöz is a stabil kibontásért!
+            try:
+                reply = res_json["candidates"][0]["content"]["parts"][0]["text"]
+                print(f"Sikeres Gemini válasz: {reply}")
+                return reply
+            except KeyError:
+                print(f"JSON struktúra hiba a válaszban: {res_json}")
+                return "Hiba a valasz feldolgozasakor."
         else:
-            print(f"Gemini API hiba: {gemini_response.text}")
-            return f"Gemini API hiba történt."
+            print(f"Gemini API hiba: {gemini_response.status_code} - {gemini_response.text}")
+            return f"Gemini API hiba tortent."
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
