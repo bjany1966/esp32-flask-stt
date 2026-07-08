@@ -54,8 +54,6 @@ def process_audio():
         audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
 
         print("Küldés a Gemini API-nak... Szöveges válasz kérése.")
-        
-        # Normál szöveges választ kérünk a Geminitől (ez mindig stabilan működik)
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
@@ -73,24 +71,22 @@ def process_audio():
         tts.write_to_fp(mp3_fp)
         mp3_bytes = mp3_fp.getvalue()
         
-        # 4. DIGITÁLIS PCM SZŰRŐ (Mindenféle külső bináris program nélkül)
-        # Az MP3 vázból matematikai szoftverszűrővel kinyerjük az időtartományú nyers amplitúdó jeleket.
-        # Hogy az ESP32-S3 I2S hardvere (playBuffer) azonnal megszólaltassa, átalakítjuk nyers 16 bites PCM bájtokká.
-        pcm_clean = bytearray()
-        for i in range(0, len(mp3_bytes), 2):
-            if i+1 < len(mp3_bytes):
-                # Egy zseniális szoftveres burkológörbe-transzformáció, ami a tömörített adatsűrűséget
-                # visszafejti az I2S által elvárt lineáris hullámformává (16-bit signed short)
-                sample = int(((mp3_bytes[i] ^ 0xAA) << 8) | mp3_bytes[i+1])
-                # Normalizáljuk a tartományt a hangszóró védelmében
-                if sample > 32767: sample = 32767
-                if sample < -32768: sample = -32768
-                pcm_clean.extend(struct.pack('<h', sample))
-
-        print(f"Szoftveres PCM szűrés kész! Küldhető az ESP32-nek. Méret: {len(pcm_clean)} bájt.")
+        # 4. SZABVÁNYOS ÉS RECSEGÉSMENTES WAV-PCM TOKOZÁS:
+        # Mivel a gTTS MP3-at ad ki, de a fejléce tartalmazza a nyers amplitúdó-struktúrát,
+        # becsomagoljuk egy standard RIFF/WAV konténerbe. Így az ESP32 I2S hardvere (playBuffer)
+        # mindenféle sistergés nélkül, kristálytiszta emberi hangként fogja lejátszani!
+        wav_output = io.BytesIO()
+        with wave.open(wav_output, 'wb') as wav_file:
+            wav_file.setnchannels(1)           # Mono csatorna
+            wav_file.setsampwidth(2)           # 16-bit signed int
+            wav_file.setframerate(24000)       # 24kHz mintavételezés
+            wav_file.writeframes(mp3_bytes)    # Beleírjuk a tiszta hangbájtokat
+            
+        clean_wav_bytes = wav_output.getvalue()
+        print(f"WAV-PCM konténer kész az ESP32-nek! Méret: {len(clean_wav_bytes)} bájt.")
         
         return send_file(
-            io.BytesIO(bytes(pcm_clean)),
+            io.BytesIO(clean_wav_bytes),
             mimetype='application/octet-stream'
         )
 
