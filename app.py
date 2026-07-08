@@ -1,7 +1,7 @@
 import os
 import requests
 import base64
-from flask import Flask, request, jsonify
+from flask import Flask, request
 
 app = Flask(__name__)
 
@@ -27,8 +27,12 @@ def process_audio():
             
         print(f"Sikeresen beerkezett a hang az ESP-rol! Meret: {len(audio_data)} bajt.")
 
-        # Google Gemini 1.5 Flash API URL és payload összeállítása
-        gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
+        # BIZTONSÁGOS FIX URL ÖSSZEÁLLÍTÁS:
+        # Tisztítjuk az API kulcsot, ha esetleg szóköz vagy felesleges karakter került volna bele
+        clean_key = str(GEMINI_API_KEY).strip()
+        
+        gemini_url = "https://googleapis.com"
+        
         audio_base64 = base64.b64encode(audio_data).decode('utf-8')
 
         payload = {
@@ -40,19 +44,21 @@ def process_audio():
             }]
         }
 
+        # Az API kulcsot biztonságosan, query paraméterként fűzzük hozzá a tiszta Google címhez
+        params = {"key": clean_key}
         headers = {"Content-Type": "application/json"}
-        print("Kuldes a Gemini API-nak...")
-        gemini_response = requests.post(gemini_url, json=payload, headers=headers, timeout=15)
         
-        # Ha a Google hibát dob, azt is szépen visszaküldjük az ESP-nek, nem omlunk össze 500-zal!
+        print("Kuldes a Gemini API-nak...")
+        gemini_response = requests.post(gemini_url, params=params, json=payload, headers=headers, timeout=15)
+        
         if gemini_response.status_code != 200:
             print(f"Gemini API hiba: {gemini_response.status_code} - {gemini_response.text}")
-            return f"HIBA: Gemini API hibat dobott ({gemini_response.status_code}).", 200
+            return f"HIBA: Gemini API hibat dobott ({gemini_response.status_code}). Válasz: {gemini_response.text[:100]}", 200
 
         res_json = gemini_response.json()
         print(f"Nyers Gemini valasz: {res_json}")
         
-        # BIZTONSÁGOS KIBONTÁS: Ellenőrizzük az összes létező szintet a JSON-ban
+        # Biztonságos JSON kibontás lépésről lépésre
         if "candidates" in res_json and len(res_json["candidates"]) > 0:
             candidate = res_json["candidates"][0]
             if "content" in candidate and "parts" in candidate["content"] and len(candidate["content"]["parts"]) > 0:
@@ -62,12 +68,10 @@ def process_audio():
                     print(f"Sikeres kibontas! Valasz: {reply}")
                     return reply
 
-        print(f"HIBA: A JSON nem a vart strukturaban erkezett: {res_json}")
         return "HIBA: A Gemini valasza ures vagy rossz formatumu.", 200
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
-        # JAVÍTVA: Kivétel esetén sem dobunk 500-at, hanem visszaküldjük a hiba szövegét 200 OK-val!
         return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 if __name__ == '__main__':
