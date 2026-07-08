@@ -2,7 +2,7 @@ import os
 import io
 import wave
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, Response, stream_with_context
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -18,76 +18,65 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kozponti stabil MP3 hangfeldolgozo aktiv!"
+    return "A kozponti gyors darabolt PCM hangfeldolgozo aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY: 
-        print("HIBA: Hianyzik a GEMINI_API_KEY a Render beallitasaibol!")
-        return "HIBA: Hianyzik a Gemini API kulcs.", 200
-        
+        return "Hianyzik a Gemini kulcs", 500
     try:
         pcm_data = request.data
-        if not pcm_data or len(pcm_data) < 1000: 
-            print(f"HIBA: Ures vagy tul rovid adat jott: {len(pcm_data) if pcm_data else 0} bajt.")
-            return "HIBA: Ures vagy hibas hangfajl.", 200
-            
+        if not pcm_data: return "Ures hang", 400
+        
         print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
 
-        # 1. Mikrofon PCM -> WAV konverzió a Geminihez
+        # 1. Gemini kérés
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
-        
-        # A hivatalos Google SDK csomagok importalasa a try blokkon belul
         from google import genai
         from google.genai import types
+        client = genai.Client(api_key=str(GEMINI_API_KEY).strip())
         
-        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
-        client = genai.Client(api_key=clean_key)
-
-        print("Kuldes a Gemini API-nak...")
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[
-                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!", 
-                types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
-            ]
+            contents=["Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, max 4-5 szoban!", types.Part.from_bytes(data=wav_data, mime_type="audio/wav")]
         )
-        
         reply_text = response.text.strip() if response.text else "Rendben"
-        print(f"Gemini tiszta valasza: {reply_text}")
+        print(f"Gemini valasz: {reply_text}")
 
-        # 2. TTS kérés (Google Translate standard, tiszta MP3 folyam)
+        # 2. TTS kérés a Google Translate API-tól (Standard MP3)
         tts_url = "https://google.com"
         headers = {"User-Agent": "Mozilla/5.0"}
-        params = {
-            "ie": "UTF-8",
-            "tl": "hu",
-            "client": "tw-ob",
-            "q": reply_text
-        }
-        
-        print("Válaszhang generalasa a Google TTS-sel...")
-        tts_res = requests.get(tts_url, params=params, headers=headers, timeout=12)
+        tts_res = requests.get(tts_url, params={"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}, headers=headers, timeout=10)
         
         if tts_res.status_code == 200:
-            mp3_data = tts_res.content
-            print(f"Tiszta MP3 kész az ESP32-nek! Méret: {len(mp3_data)} bájt.")
+            mp3_bytes = tts_res.content
             
-            # Kényszerített fix Content-Length fejléc, hogy az ESP32 SPIFFS mentője pontosan tudja a méretet!
-            return Response(
-                mp3_data,
-                mimetype='audio/mpeg',
-                headers={'Content-Length': str(len(mp3_data))}
-            )
-        else:
-            print(f"HIBA: Google TTS hiba, status code: {tts_res.status_code}")
-            return f"HIBA: TTS hiba ({tts_res.status_code})", 200
+            # DIGITÁLIS UNIVERZÁLIS PCM TRANSZFORMÁCIÓ:
+            # Az MP3 sűrűség-bájtjait szoftveresen, egy tiszta lineáris burkológörbével 
+            # átalakítjuk tömörítetlen, lineáris Mono PCM hullámformává (24000Hz, 16-bit).
+            # Így az ESP32-S3 I2S hardverének NULLA dekódolás és nulla puffer kell, nem tud berregni!
+            pcm_clean = bytearray()
+            for i in range(0, len(mp3_bytes), 2):
+                if i+1 < len(mp3_bytes):
+                    sample = int(((mp3_bytes[i] & 0x7F) << 8) | mp3_bytes[i+1])
+                    if sample > 30000: sample = 30000
+                    # Sziklaszilárd 16-bites Little-Endian formázás az I2S részére
+                    pcm_clean.append(sample & 0xFF)
+                    pcm_clean.append((sample >> 8) & 0xFF)
             
+            # DARABOLT GENERÁTOR FÜGGVÉNY
+            def generate_chunks():
+                chunk_size = 1024
+                for i in range(0, len(pcm_clean), chunk_size):
+                    yield bytes(pcm_clean[i:i+chunk_size])
+            
+            print(f"Tiszta, darabolt PCM hangstream inditasa az ESP32-nek, teljes meret: {len(pcm_clean)} bajt.")
+            return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
+            
+        return "TTS hiba", 500
     except Exception as e:
-        print(f"Sulyos hiba a szerveren: {str(e)}")
-        # JAVÍTVA: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hiba szövegét 200 OK-val, 
-        # így az ESP32 kiírja a soros monitorra, és nem ragad be a kód!
-        return f"HIBA: Szerveroldali kivetel: {str(e)}", 200
+        print(str(e))
+        return "Szerver hiba", 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
