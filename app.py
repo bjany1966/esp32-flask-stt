@@ -1,7 +1,6 @@
 import os
 import io
 import wave
-import base64
 import requests
 from flask import Flask, request, Response
 
@@ -19,92 +18,51 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kozponti direkt Gemini HANG streamelo szerver aktiv!"
+    return "A kozponti stabil MP3 hangfeldolgozo aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY: 
-        return "HIBA: Hianyzik a Gemini kulcs a Render beallitasaibol.", 200
+        return "Hianyzik a Gemini kulcs", 500
     try:
         pcm_data = request.data
-        if not pcm_data or len(pcm_data) < 1000: 
-            return "HIBA: Ures vagy hibas hangfajl erkezett.", 200
+        if not pcm_data: return "Ures hang", 400
         
-        print(f"Mikrofonhang beerkezett az ESP-ről: {len(pcm_data)} bajt.")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
 
-        # 1. Mikrofon PCM -> WAV konverzió a Gemini bemenetének
+        # 1. Gemini szöveges kérés
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
-        audio_base64 = base64.b64encode(wav_data).decode('utf-8')
-
-        # 2. HTTP POST kérés a Gemini 2.5 Flash felé
-        gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=str(GEMINI_API_KEY).strip())
         
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": "Valaszolj a hallott hangra tisztan magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"},
-                    {"inlineData": {"mimeType": "audio/wav", "data": audio_base64}}
-                ]
-            }],
-            "generation_config": {
-                "response_mime_type": "audio/wav",
-                "speech_config": {
-                    "voice_config": {
-                        "prebuilt_voice_config": {
-                            "voice_name": "Puck" 
-                        }
-                    }
-                }
-            }
-        }
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=["Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, max 4-5 szoban!", types.Part.from_bytes(data=wav_data, mime_type="audio/wav")]
+        )
+        reply_text = response.text.strip() if response.text else "Rendben"
+        print(f"Gemini valasz: {reply_text}")
 
-        print("Küldés a Google Gemini felé HANG generálásra...")
-        headers = {"Content-Type": "application/json"}
-        gemini_response = requests.post(gemini_url, json=payload, headers=headers, timeout=20)
+        # 2. TTS kérés (Google Translate standard, tiszta MP3)
+        tts_url = "https://google.com"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        tts_res = requests.get(tts_url, params={"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}, headers=headers, timeout=10)
         
-        if gemini_response.status_code == 200:
-            res_json = gemini_response.json()
+        if tts_res.status_code == 200:
+            mp3_data = tts_res.content
+            print(f"Tiszta MP3 hang kesz az ESP-nek: {len(mp3_data)} bajt.")
             
-            audio_bytes = None
-            try:
-                def find_audio_data(d):
-                    if isinstance(d, dict):
-                        for k, v in d.items():
-                            if k == 'inlineData' and isinstance(v, dict) and 'data' in v:
-                                return base64.b64decode(v['data'])
-                            elif k == 'data' and isinstance(v, str) and len(v) > 2000:
-                                try: return base64.b64decode(v)
-                                except Exception: pass
-                            ret = find_audio_data(v)
-                            if ret: return ret
-                    elif isinstance(d, list):
-                        for item in d:
-                            ret = find_audio_data(item)
-                            if ret: return ret
-                    return None
-                
-                audio_bytes = find_audio_data(res_json)
-            except Exception as json_e:
-                print(f"Hiba a JSON parsolas közben: {str(json_e)}")
-
-            if audio_bytes:
-                # Levágjuk az első 44 bájtot (WAV fejléc), hogy tiszta PCM bájtokat kapjunk
-                pcm_clean = audio_bytes[44:] if len(audio_bytes) > 44 else audio_bytes
-                print(f"A Gemini gyári hangválasza kész! Méret: {len(pcm_clean)} bájt.")
-                
-                # JAVÍTVA: Fix, kényszerített Content-Length fejléc, hogy az ESP pontosan tudja, mikor kell leállnia!
-                return Response(
-                    bytes(pcm_clean),
-                    mimetype='application/octet-stream',
-                    headers={'Content-Length': str(len(pcm_clean))}
-                )
-            else:
-                return "HIBA: Nem erkezett hangadat a Google-tol.", 200
-        else:
-            return f"HIBA: Google API hiba ({gemini_response.status_code}).", 200
+            # Fix hosszt küldünk vissza, nem engedjük a Rendernek a darabolást!
+            return Response(
+                mp3_data,
+                mimetype='audio/mpeg',
+                headers={'Content-Length': str(len(mp3_data))}
+            )
             
+        return "TTS hiba", 500
     except Exception as e:
-        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
+        print(str(e))
+        return "Szerver hiba", 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
