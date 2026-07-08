@@ -1,21 +1,14 @@
 import os
 import io
 import wave
-import base64
-from flask import Flask, request, Response, stream_with_context
-from google import genai
-from google.genai import types
+import requests
+from flask import Flask, request, send_file
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-client = None
-if GEMINI_API_KEY:
-    try:
-        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
-        client = genai.Client(api_key=clean_key)
-    except Exception as e:
-        print(f"Kliens inditasi hiba: {str(e)}")
+# Átmeneti globális változó a legutolsó legenerált hang tárolására
+latest_mp3_bytes = b""
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
     wav_io = io.BytesIO()
@@ -28,84 +21,59 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A központi direkt Gemini HANG streamelő szerver aktív!"
+    return "A kozponti MP3 streaming szerver aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
-    global client
-    if not client:
-        raw_key = os.environ.get("GEMINI_API_KEY")
-        if raw_key:
-            clean_key = str(raw_key).replace("\n", "").replace("\r", "").strip()
-            client = genai.Client(api_key=clean_key)
-        else:
-            return "HIBA: Hianyzo API kulcs.", 200
-
+    global latest_mp3_bytes
+    if not GEMINI_API_KEY: 
+        return "HIBA: Hianyzik a Gemini kulcs", 500
     try:
         pcm_data = request.data
-        if not pcm_data or len(pcm_data) < 1000: 
-            return "HIBA: Ures vagy hibas hangfajl erkezett.", 200
+        if not pcm_data: return "Ures hang", 400
         
-        print(f"Mikrofonhang beerkezett az ESP-ről: {len(pcm_data)} bajt.")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
 
-        # 1. Mikrofon PCM -> WAV konverzió a Gemini bemenetének
+        # 1. Gemini szöveges kérés (ez ingyenesen és sziklaszilárdan működik)
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
-        audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
-
-        print("Küldés a Google Gemini felé... Közvetlen HANG válasz kérése.")
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=str(GEMINI_API_KEY).strip())
         
-        # Hivatalos, legújabb SDK konfiguráció a hang kimenethez (Puck férfi beszédhang)
-        config = types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Puck"
-                    )
-                )
-            )
-        )
-
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[
-                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!",
-                audio_part
-            ],
-            config=config
+            contents=["Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, max 4-5 szoban!", types.Part.from_bytes(data=wav_data, mime_type="audio/wav")]
         )
+        reply_text = response.text.strip() if response.text else "Rendben"
+        print(f"Gemini valasz: {reply_text}")
+
+        # 2. TTS kérés a Google Translate-től (Standard, tökéletes MP3)
+        tts_url = "https://google.com"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        params = {"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}
         
-        # 2. Kivesszük a beérkező nyers hangbájtokat a Google válaszból
-        audio_bytes = None
-        try:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data and part.inline_data.data:
-                    audio_bytes = base64.b64decode(part.inline_data.data)
-                    break
-        except Exception as e:
-            print(f"Nem sikerült kivenni a hangbájtokat: {str(e)}")
-
-        if audio_bytes:
-            # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, Mono PCM-et kapjon
-            pcm_clean = audio_bytes[44:] if len(audio_bytes) > 44 else audio_bytes
-            print(f"A Gemini gyári tiszta hangválasza kicsomagolva! Méret: {len(pcm_clean)} bájt.")
-            
-            # 3. DARABOLT (CHUNKED) ÁTVITEL: 
-            # 1024 bájtos darabokban küldjük vissza, így az ESP-nek nem fogy el a RAM-ja (nincs OOM)
-            def generate_chunks():
-                chunk_size = 1024
-                for i in range(0, len(pcm_clean), chunk_size):
-                    yield bytes(pcm_clean[i:i+chunk_size])
-            
-            return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
-        else:
-            print("A Gemini csak szöveggel válaszolt: ", response.text)
-            return f"HIBA: Nem erkezett hang a Google-tol. Szoveg: {response.text}", 200
-
+        tts_res = requests.get(tts_url, params=params, headers=headers, timeout=10)
+        if tts_res.status_code == 200:
+            latest_mp3_bytes = tts_res.content
+            print(f"Tiszta MP3 elmentve a szerver memóriájába: {len(latest_mp3_bytes)} bájt.")
+            return "OK"
+        return "TTS hiba", 500
     except Exception as e:
-        print(f"Hiba a szerveren: {str(e)}")
-        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
-        return f"HIBA: Szerveroldali kivetel: {str(e)}", 200
+        print(str(e))
+        return "Szerver hiba", 500
+
+# Ezen a végponton keresztül az ESP32 tiszta HTTP-n (SSL nélkül) éri el a hangot!
+# Ez megszünteti az SSL miatti 720 KB-os pufferigényt és az OOM hibát!
+@app.route('/get_audio_stream.mp3', methods=['GET'])
+def get_audio_stream():
+    global latest_mp3_bytes
+    if len(latest_mp3_bytes) > 0:
+        return send_file(
+            io.BytesIO(latest_mp3_bytes),
+            mimetype='audio/mpeg',
+            as_attachment=False
+        )
+    return "Nincs kesz hang", 404
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
