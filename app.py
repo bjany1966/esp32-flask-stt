@@ -45,7 +45,7 @@ def process_audio():
             res_json = gemini_response.json()
             print(f"Nyers Gemini valasz: {res_json}")
             
-            # ATOMBIZTOS JAVÍTÁS: A Gemini 1.5 Flash tömbstruktúrájának precíz, indexelt kibontása
+            # ABSZOLÚT JAVÍTÁS: Pontos [0] indexelés a listákhoz a 500-as hiba ellen
             try:
                 reply = res_json["candidates"][0]["content"]["parts"][0]["text"]
                 print(f"Sikeres kibontas! Valasz: {reply}")
