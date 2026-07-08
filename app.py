@@ -2,11 +2,14 @@ import os
 import io
 import wave
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, send_file
 
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+# Átmeneti globális változó a legutolsó legenerált hang tárolására
+latest_mp3_data = b""
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
     wav_io = io.BytesIO()
@@ -19,10 +22,11 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kozponti MP3 hangfeldolgozo szerver aktiv!"
+    return "A kozponti hangfeldolgozo szerver aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
+    global latest_mp3_data
     if not GEMINI_API_KEY:
         return "HIBA: Hianyzik az API kulcs.", 500
 
@@ -42,7 +46,7 @@ def process_audio():
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
         client = genai.Client(api_key=clean_key)
 
-        print("Küldés a Gemini API-nak... Szöveges válasz kérése.")
+        print("Küldés a Gemini API-nak...")
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
@@ -54,7 +58,7 @@ def process_audio():
         reply_text = response.text.strip() if response.text else "Rendben"
         print(f"Gemini szöveges válasza: {reply_text}")
 
-        # 2. HANGGENERÁLÁS: Google TTS szabványos, tiszta MP3 folyam lekérése
+        # 2. HANGGENERÁLÁS: Google TTS szabványos MP3 lekérése
         tts_url = "https://google.com"
         headers = {"User-Agent": "Mozilla/5.0"}
         params = {
@@ -66,14 +70,28 @@ def process_audio():
         
         tts_response = requests.get(tts_url, params=params, headers=headers, timeout=10)
         if tts_response.status_code == 200:
-            print(f"Tiszta MP3 hang legenerálva! Méret: {len(tts_response.content)} bájt.")
-            return Response(tts_response.content, mimetype='audio/mpeg')
+            # Eltároljuk a hangot a memóriában az ESP32 letöltéséhez
+            latest_mp3_data = tts_response.content
+            print(f"Tiszta MP3 hang elmentve! Méret: {len(latest_mp3_data)} bájt.")
+            return "OK" # Egyszerű nyugtát küldünk vissza az ESP-nek
         else:
             return "HIBA: Nem sikerult hangot generalni", 500
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
         return f"HIBA: Szerver hiba: {str(e)}", 500
+
+# Ezen a végponton keresztül fogja az ESP32 közvetlenül streamelni a hangot az internetről
+@app.route('/get_response_mp3', methods=['GET'])
+def get_response_mp3():
+    global latest_mp3_data
+    if len(latest_mp3_data) > 0:
+        return send_file(
+            io.BytesIO(latest_mp3_data),
+            mimetype='audio/mpeg',
+            as_attachment=False
+        )
+    return "Nincs kesz hangfajl", 404
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
