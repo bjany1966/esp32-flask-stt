@@ -43,9 +43,9 @@ def process_audio():
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
 
-        # 2. Közvetlen HTTP kérést indítunk a Google felé (ZÉRÓ SDK FÜGGŐSÉG!)
-        # Így elkerüljük az SDK belső függvény- és importálási hibáit!
-        gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
+        # JAVÍTVA: Az API kulcs tisztítása és az internetcím precíz különválasztása, hogy véletlenül se ragadjanak össze!
+        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
+        gemini_url = "https://googleapis.com"
         
         payload = {
             "contents": [{
@@ -58,7 +58,8 @@ def process_audio():
 
         print("Küldés a Google Gemini felé tiszta HTTP POST-tal...")
         headers = {"Content-Type": "application/json"}
-        gemini_response = requests.post(gemini_url, json=payload, headers=headers, timeout=20)
+        # A kulcsot biztonságosan, URL paraméterként fűzzük hozzá külön változóban
+        gemini_response = requests.post(gemini_url, params={"key": clean_key}, json=payload, headers=headers, timeout=20)
         
         if gemini_response.status_code == 200:
             res_json = gemini_response.json()
@@ -90,7 +91,6 @@ def process_audio():
             
     except Exception as e:
         print(f"Sulyos hiba a szerveren: {str(e)}")
-        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
         return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 # Ezen a végponton keresztül az ESP32 tiszta HTTP-n (SSL nélkül) éri el a hangot!
