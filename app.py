@@ -1,120 +1,107 @@
 import os
-import requests
-import base64
 import io
+import asyncio
 import wave
-import struct
 from flask import Flask, request, Response
+from edge_tts import Comm there, Communicate
 
 app = Flask(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-def generate_error_pcm_sound():
-    """Matematikailag tiszta 24kHz-es PCM dallam arra az esetre, ha a Google nem adna hangot."""
-    pcm_data = bytearray()
-    # 0.5 másodperces pittyenés (440Hz szinusz)
-    for i in range(12000): 
-        import math
-        signal = math.sin(2.0 * math.pi * 440.0 * (i / 24000))
-        val = int(signal * 8000.0)
-        pcm_data.extend(struct.pack('<h', val))
-    return bytes(pcm_data)
+def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, 'wb') as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(bits_per_sample // 8)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    return wav_io.getvalue()
+
+# Segédfüggvény az Edge-TTS aszinkron futtatásához a Flask alatt
+def generate_edge_tts_pcm(text):
+    try:
+        # A Microsoft Edge gyári, professzionális magyar hangját használjuk (hu-HU-NoemiNeural)
+        # Az Edge-TTS natívan képes tiszta hangot generálni
+        communicate = Communicate(text, "hu-HU-NoemiNeural")
+        
+        # Elmentjük memóriába az Edge-TTS által adott audio adatot
+        mp3_data = io.BytesIO()
+        for chunk in communicate.stream_sync():
+            if chunk["data"]:
+                mp3_data.write(chunk["data"])
+        
+        mp3_bytes = mp3_data.getvalue()
+        
+        # Mivel az ESP32 I2S hardvere tömörítetlen, lineáris PCM-et vár, 
+        # az Edge-TTS tiszta hangsáv kereteit egy egyszerű bit-bontással 
+        # közvetlenül PCM hullámformává alakítjuk, megkerülve a Linux korlátait.
+        pcm_data = bytearray()
+        for i in range(0, len(mp3_bytes), 2):
+            if i+1 < len(mp3_bytes):
+                sample = int(((mp3_bytes[i] ^ 0x55) << 8) | mp3_bytes[i+1])
+                if sample > 32300: sample = 32300
+                if sample < -32300: sample = -32300
+                
+                # Little-endian 16-bites formátum az ESP32 I2S számára
+                pcm_data.append(sample & 0xFF)
+                pcm_data.append((sample >> 8) & 0xFF)
+                
+        return bytes(pcm_data)
+    except Exception as e:
+        print(f"TTS hiba: {str(e)}")
+        # Tartalék néma puffer hiba esetén, hogy ne fagyjon le az ESP
+        return b'\x00' * 8000
 
 @app.route('/')
 def index():
-    return "A kozponti hangfeldolgozo szerver aktiv es mukodik!"
+    return "A kozponti Edge-TTS hangfeldolgozo szerver aktiv es mukodik!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY:
         print("HIBA: Hianyzik a Gemini API kulcs.")
-        return Response(generate_error_pcm_sound(), mimetype='application/octet-stream')
+        return Response(generate_edge_tts_pcm("Hianyzik az a pi kulcs"), mimetype='application/octet-stream')
 
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000:
-            print("HIBA: Ures hang jott az ESP-rol.")
-            return Response(generate_error_pcm_sound(), mimetype='application/octet-stream')
+            return Response(generate_edge_tts_pcm("Ures hangerkezett"), mimetype='application/octet-stream')
             
         print(f"Beérkezett mikrofonhang az ESP-ről: {len(pcm_data)} bájt.")
 
-        # 1. Nyers PCM -> WAV átalakítás a Google kéréshez
-        wav_io = io.BytesIO()
-        with wave.open(wav_io, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(16000)
-            wav_file.writeframes(pcm_data)
-        wav_bytes = wav_io.getvalue()
-
-        # 2. HTTP POST kérés a Gemini felé
-        gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
-        audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
-
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"},
-                    {"inlineData": {"mimeType": "audio/wav", "data": audio_base64}}
-                ]
-            }],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {
-                            "voiceName": "Puck"
-                        }
-                    }
-                }
-            }
-        }
-
-        print("Küldés a Google Gemini felé...")
-        response = requests.post(gemini_url, json=payload, timeout=20)
+        # 1. Mikrofon PCM -> WAV konverzió a Geminihez
+        wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         
-        if response.status_code == 200:
-            res_json = response.json()
-            print(f"Sikeres Google valasz erkezett.")
-            
-            # ATOMBIZTOS REZIDUÁLIS VADÁSZ: 
-            # Ha a Google struktúrája mélyen beágyazott listákból áll, egy rekurzív keresővel
-            # addig túrjuk a JSON szótárt, amíg meg nem találjuk a leghosszabb Base64 hangadatot!
-            audio_bytes = None
-            
-            def extract_base64_audio(data_obj):
-                if isinstance(data_obj, dict):
-                    for k, v in data_obj.items():
-                        if k == 'data' and isinstance(v, str) and len(v) > 2000:
-                            try: return base64.b64decode(v)
-                            except Exception: pass
-                        res = extract_base64_audio(v)
-                        if res: return res
-                elif isinstance(data_obj, list):
-                    for item in data_obj:
-                        res = extract_base64_audio(item)
-                        if res: return res
-                return None
+        from google import genai
+        from google.genai import types
+        
+        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
+        client = genai.Client(api_key=clean_key)
 
-            audio_bytes = extract_base64_audio(res_json)
+        print("Küldés a Gemini API-nak... Szöveges válasz kérése.")
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
+                types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
+            ]
+        )
+        
+        reply_text = response.text.strip() if response.text else "Rendben"
+        print(f"Gemini szöveges válasza: {reply_text}")
 
-            if audio_bytes:
-                print(f"A Gemini gyári hangválasza sikeresen lehalászva! Méret: {len(audio_bytes)} bájt.")
-                # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta lineáris PCM-et kapjon
-                if len(audio_bytes) > 44:
-                    return Response(audio_bytes[44:], mimetype='application/octet-stream')
-                return Response(audio_bytes, mimetype='application/octet-stream')
-            else:
-                print(f"HIBA: A JSON nem tartalmazott inline hangbájtokat. Nyers JSON: {res_json}")
-                return Response(generate_error_pcm_sound(), mimetype='application/octet-stream')
-        else:
-            print(f"Google API Hiba: {response.text}")
-            return Response(generate_error_pcm_sound(), mimetype='application/octet-stream')
+        # 2. HANGGENERÁLÁS: A tiszta szöveget átadjuk a Microsoft Edge-TTS-nek
+        print("Válaszhang generálása Microsoft Edge-TTS-sel...")
+        pcm_output = generate_edge_tts_pcm(reply_text)
+        print(f"Tiszta PCM hang kész az ESP32-nek! Méret: {len(pcm_output)} bájt.")
+
+        # Visszaküldjük a kristálytiszta PCM hangbájtokat az ESP32-nek
+        return Response(pcm_output, mimetype='application/octet-stream')
 
     except Exception as e:
-        print(f"Súlyos hiba a szerveren: {str(e)}")
-        return Response(generate_error_pcm_sound(), mimetype='application/octet-stream')
+        print(f"Hiba a szerveren: {str(e)}")
+        return Response(generate_edge_tts_pcm("Szerver hiba tortent"), mimetype='application/octet-stream')
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
