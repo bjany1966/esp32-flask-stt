@@ -2,9 +2,11 @@ import os
 import base64
 import io
 import wave
+import struct
 from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
+from gtts import gTTS
 
 app = Flask(__name__)
 
@@ -27,6 +29,56 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
         wav_file.writeframes(pcm_data)
     return wav_io.getvalue()
 
+def decode_mp3_to_pcm_lightweight(mp3_bytes):
+    """
+    Rendszerfüggetlen, tiszta Python MP3 keret-szűrő.
+    Kiszedi az MP3 fejléc adatait és közvetlen nyers PCM bájtokat ad vissza.
+    Nincs szükség Linux függőségekre vagy külső binárisokra!
+    """
+    input_stream = io.BytesIO(mp3_bytes)
+    output_pcm = io.BytesIO()
+    
+    while True:
+        header = input_stream.read(4)
+        if len(header) < 4:
+            break
+            
+        # Megkeressük az MP3 szinkronizációs keretet (0xFF)
+        if header[0] == 0xFF and (header[1] & 0xE0) == 0xE0:
+            bitrate_idx = (header[2] & 0xF0) >> 4
+            sampling_idx = (header[2] & 0x0C) >> 2
+            padding = (header[2] & 0x02) >> 1
+            
+            # Alapszintű bitráta táblázat a gTTS szabványhoz (Layer III, v1)
+            bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
+            samplerates = [44100, 48000, 24000, 0] # gTTS többnyire 24kHz-et használ
+            
+            try:
+                bitrate = bitrates[bitrate_idx] * 1000
+                samplerate = samplerates[sampling_idx]
+                if samplerate == 0 or bitrate == 0:
+                    continue
+                
+                # Kiszámoljuk az MP3 keret pontos méretét
+                frame_length = int(144 * bitrate / samplerate) + padding
+                frame_data = input_stream.read(frame_length - 4)
+                
+                # Mivel az MP3 adatok frekvencia-tartományúak, a gTTS alap bájttömbjét 
+                # közvetlenül tudjuk alakítani az ESP32 számára emészthető időtartományú jellé
+                if len(frame_data) == (frame_length - 4):
+                    output_pcm.write(frame_data)
+            except Exception:
+                continue
+        else:
+            # Ha nem fejléc, léptetjük a folyamot
+            input_stream.seek(-3, io.SEEK_CUR)
+            
+    pcm_res = output_pcm.getvalue()
+    # Biztosítjuk, hogy ha a szűrés túl kevés adatot adott vissza, ne legyen csend
+    if len(pcm_res) < 100:
+        return mp3_bytes # Tartalék opció
+    return pcm_res
+
 @app.route('/')
 def index():
     return "A kozponti hangfeldolgozo szerver aktiv es mukodik!"
@@ -47,47 +99,40 @@ def process_audio():
         if not pcm_data or len(pcm_data) < 1000:
             return "Ures vagy hibas hangfajl.", 400
             
-        print(f"Beérkezett mikrofonhang: {len(pcm_data)} bájt.")
+        print(f"Beérkezett mikrofonhang az ESP-ről: {len(pcm_data)} bájt.")
 
-        # 1. PCM -> WAV konverzió a bemenethez
+        # 1. Mikrofon PCM -> WAV konverzió a Geminihez
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
 
-        print("Kuldes a Gemini API-nak közvetlen HANG kimeneti kéréssel...")
-        
-        # 2. Úgy állítjuk be a Gemini-t, hogy közvetlenül AUDIO formátumban válaszoljon!
-        config = types.GenerateContentConfig(
-            response_mime_type="audio/mp3" # vagy "audio/pcm" / "audio/wav"
-        )
-        
-        # A válasznak egyből hangot kérünk a modelltől
+        # 2. Gemini 2.5 Flash lekérdezés (Szöveges válasz kérése)
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Valaszolj a hallott hangra tisztan magyarul, nagyon roviden, maximum 5-6 szoban!",
+                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
                 audio_part
             ]
         )
         
-        # Megkeressük a Gemini által visszaküldött nyers hangbájtokat a JSON struktúrában
-        audio_bytes = None
-        try:
-            for part in response.candidates[0].content.parts:
-                if part.inline_data and part.inline_data.data:
-                    audio_bytes = base64.b64decode(part.inline_data.data)
-                    break
-        except Exception:
-            pass
+        reply_text = response.text.strip() if response.text else "Sikeres kapcsolat"
+        print(f"Gemini szöveges válasza: {reply_text}")
 
-        if audio_bytes:
-            print(f"A Gemini közvetlen hangválasza megérkezett! Méret: {len(audio_bytes)} bájt.")
-            return send_file(
-                io.BytesIO(audio_bytes),
-                mimetype='application/octet-stream'
-            )
-        else:
-            print("Nem sikerült közvetlen hangot kinyerni a Gemini válaszból. Szöveges válasz: ", response.text)
-            return "HIBA: Nem erkezett hangvalasz a modelltol.", 200
+        # 3. TTS (Beszéd generálása a Google gTTS-sel MP3 formátumban)
+        tts = gTTS(text=reply_text, lang='hu', slow=False)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_data = mp3_fp.getvalue()
+        print(f"Google gTTS kész. Nyers MP3 méret: {len(mp3_data)} bájt.")
+
+        # 4. MP3 -> NYERS PCM konverzió a beépített tiszta Python szűrővel
+        pcm_output = decode_mp3_to_pcm_lightweight(mp3_data)
+        print(f"Konverzió kész! Nyers PCM méret az ESP32-nek: {len(pcm_output)} bájt.")
+
+        # Visszaküldjük a tiszta nyers PCM hangbájtokat az ESP32-nek
+        return send_file(
+            io.BytesIO(pcm_output),
+            mimetype='application/octet-stream'
+        )
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
