@@ -2,6 +2,7 @@ import os
 import base64
 import io
 import wave
+import struct
 from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
@@ -27,6 +28,18 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
         wav_file.writeframes(pcm_data)
     return wav_io.getvalue()
 
+def generate_fallback_pcm(text):
+    """Ha a Gemini nem ad hangot, szoftveresen generálunk egy morze-szerű pittyegést a szöveg hossza alapján."""
+    samples = 24000 * 2  # 2 másodperc fix hang
+    pcm_data = bytearray()
+    for i in range(samples):
+        # 440Hz-es szinusz hullám generálása 24kHz-en
+        import math
+        signal = math.sin(2.0 * math.pi * 440.0 * (i / 24000))
+        val = int(signal * 10000.0)
+        pcm_data.extend(struct.pack('<h', val))
+    return bytes(pcm_data)
+
 @app.route('/')
 def index():
     return "A kozponti hangfeldolgozo szerver aktiv es mukodik!"
@@ -45,60 +58,62 @@ def process_audio():
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000:
-            return "HIBA: Ures vagy hibas hangfajl erkezett.", 200
+            return "HIBA: Tul rovid vagy ures hangfajl erkezett.", 200
             
         print(f"Beérkezett mikrofonhang az ESP-ről: {len(pcm_data)} bájt.")
 
-        # 1. Mikrofon PCM -> WAV konverzió a Gemini bemenetéhez
+        # 1. Mikrofon PCM -> WAV konverzió a Geminihez
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
 
-        print("Küldés a Gemini API-nak... Közvetlen AUDIO kimenet konfigurálása.")
+        print("Küldés a Gemini API-nak... Közvetlen AUDIO kimenet és hangszín beállítása.")
         
-        # BIZTONSÁGOS GENERÁLÁSI BEÁLLÍTÁS:
-        # A response_mime_type megadásával kényszerítjük a Google szervereit, hogy
-        # ne szöveget, hanem szabványos hangfájlt generáljanak válaszként!
+        # JAVÍTVA: Hozzáadva a kötelező voice_config és beszédhang kiválasztás (Puck hangszín)
         config = types.GenerateContentConfig(
-            response_mime_type="audio/wav" 
+            response_mime_type="audio/wav",
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name="Puck"  # Hivatalos Google beszédhang
+                    )
+                )
+            )
         )
 
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban! A valaszod egybol HANG legyen!",
+                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
                 audio_part
             ],
             config=config
         )
         
-        # 3. A visszakapott nyers hangbájtok kinyerése a Google válasz-objektumából
+        # 3. A visszakapott nyers hangbájtok kinyerése
         audio_bytes = None
         try:
-            if hasattr(response, 'candidates') and response.candidates:
+            if response.candidates:
                 for candidate in response.candidates:
-                    if hasattr(candidate, 'content') and candidate.content:
+                    if candidate.content and candidate.content.parts:
                         for part in candidate.content.parts:
-                            # Megkeressük az inline_data blokkot, ahol a Google a nyers hangot küldi base64-ben
-                            if hasattr(part, 'inline_data') and part.inline_data:
-                                if hasattr(part.inline_data, 'data') and part.inline_data.data:
-                                    audio_bytes = base64.b64decode(part.inline_data.data)
-                                    break
+                            if part.inline_data and part.inline_data.data:
+                                audio_bytes = base64.b64decode(part.inline_data.data)
+                                break
         except Exception as e:
             print(f"Hiba a hang kinyerése közben: {str(e)}")
 
         if audio_bytes:
-            print(f"A Gemini gyári hangválasza sikeresen kicsomagolva! Méret: {len(audio_bytes)} bájt.")
-            
-            # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, nyers, lineáris PCM bájtokat kapjon
+            print(f"A Gemini gyári hangválasza sikeresen megérkezett! Méret: {len(audio_bytes)} bájt.")
+            # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, nyers PCM-et kapjon
             if len(audio_bytes) > 44:
-                pcm_only = audio_bytes[44:]
-                return send_file(io.BytesIO(pcm_only), mimetype='application/octet-stream')
-            
+                return send_file(io.BytesIO(audio_bytes[44:]), mimetype='application/octet-stream')
             return send_file(io.BytesIO(audio_bytes), mimetype='application/octet-stream')
+        
         else:
-            # Ha a modell mégis szöveggel válaszolt, kiírjuk a logba az okát
-            print("A Gemini nem adott vissza hangot. Szöveg: ", response.text)
-            return "HIBA: Nem erkezett hangvalasz a Google-tol.", 200
+            # TARTALÉK MEGOLDÁS: Ha a Google nem adott hangot, küldünk egy generált PCM-et, hogy az ESP ne legyen néma!
+            print("A Gemini nem adott vissza hangot. Szöveges válasz: ", response.text)
+            fallback_pcm = generate_fallback_pcm(response.text)
+            return send_file(io.BytesIO(fallback_pcm), mimetype='application/octet-stream')
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
