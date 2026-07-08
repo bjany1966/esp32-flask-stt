@@ -6,6 +6,7 @@ from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
 from gtts import gTTS
+import minimp3
 
 app = Flask(__name__)
 
@@ -72,13 +73,17 @@ def process_audio():
         tts.write_to_fp(mp3_fp)
         mp3_fp.seek(0)
         
-        raw_output = mp3_fp.getvalue()
-        print(f"Válaszhang (MP3) kész! Méret: {len(raw_output)} bájt.")
+        # 4. MP3 -> NYERS PCM Konverzió minimp3-mal (Nincs Linux függőség!)
+        mp3_data = mp3_fp.getvalue()
+        # A minimp3 decodolja az MP3-at nyers 16 bites PCM bájtokká
+        _, _, pcm_frames = minimp3.decode(mp3_data)
+        
+        print(f"Válaszhang átszámítva tiszta PCM bájtokká! Új méret: {len(pcm_frames)} bájt.")
 
-        # Visszaküldjük a tiszta MP3 adatfolyamot az ESP32-nek
+        # Visszaküldjük a tiszta nyers PCM bájtokat az ESP32-nek
         return send_file(
-            io.BytesIO(raw_output),
-            mimetype='audio/mpeg'
+            io.BytesIO(pcm_frames),
+            mimetype='application/octet-stream'
         )
 
     except Exception as e:
