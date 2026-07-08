@@ -1,10 +1,10 @@
 import os
+import base64
 import io
 import wave
 from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
-from gtts import gTTS
 
 app = Flask(__name__)
 
@@ -49,46 +49,56 @@ def process_audio():
             
         print(f"Beérkezett mikrofonhang az ESP-ről: {len(pcm_data)} bájt.")
 
-        # 1. Mikrofon PCM -> WAV konverzió a Geminihez
+        # 1. Mikrofon PCM -> WAV konverzió a Gemini bemenetéhez
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
 
-        print("Küldés a Gemini API-nak... Szöveges válasz kérése.")
+        print("Küldés a Gemini API-nak... Közvetlen AUDIO kimenet konfigurálása.")
+        
+        # BIZTONSÁGOS GENERÁLÁSI BEÁLLÍTÁS:
+        # A response_mime_type megadásával kényszerítjük a Google szervereit, hogy
+        # ne szöveget, hanem szabványos hangfájlt generáljanak válaszként!
+        config = types.GenerateContentConfig(
+            response_mime_type="audio/wav" 
+        )
+
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
+                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban! A valaszod egybol HANG legyen!",
                 audio_part
-            ]
+            ],
+            config=config
         )
         
-        reply_text = response.text.strip() if response.text else "Sikeres kapcsolat"
-        print(f"Gemini tiszta válasza: {reply_text}")
+        # 3. A visszakapott nyers hangbájtok kinyerése a Google válasz-objektumából
+        audio_bytes = None
+        try:
+            if hasattr(response, 'candidates') and response.candidates:
+                for candidate in response.candidates:
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            # Megkeressük az inline_data blokkot, ahol a Google a nyers hangot küldi base64-ben
+                            if hasattr(part, 'inline_data') and part.inline_data:
+                                if hasattr(part.inline_data, 'data') and part.inline_data.data:
+                                    audio_bytes = base64.b64decode(part.inline_data.data)
+                                    break
+        except Exception as e:
+            print(f"Hiba a hang kinyerése közben: {str(e)}")
 
-        # 3. TTS generálás (Google gTTS használata tiszta MP3 adatfolyammal)
-        tts = gTTS(text=reply_text, lang='hu', slow=False)
-        mp3_fp = io.BytesIO()
-        tts.write_to_fp(mp3_fp)
-        mp3_bytes = mp3_fp.getvalue()
-        
-        # 4. SZABVÁNYOS ÉS RECSEGÉSMENTES WAV-PCM TOKOZÁS:
-        # Mivel a gTTS MP3-at ad ki, de a fejléce tartalmazza a nyers amplitúdó-struktúrát,
-        # becsomagoljuk egy standard RIFF/WAV konténerbe. Így az ESP32 I2S hardvere (playBuffer)
-        # mindenféle sistergés nélkül, kristálytiszta emberi hangként fogja lejátszani!
-        wav_output = io.BytesIO()
-        with wave.open(wav_output, 'wb') as wav_file:
-            wav_file.setnchannels(1)           # Mono csatorna
-            wav_file.setsampwidth(2)           # 16-bit signed int
-            wav_file.setframerate(24000)       # 24kHz mintavételezés
-            wav_file.writeframes(mp3_bytes)    # Beleírjuk a tiszta hangbájtokat
+        if audio_bytes:
+            print(f"A Gemini gyári hangválasza sikeresen kicsomagolva! Méret: {len(audio_bytes)} bájt.")
             
-        clean_wav_bytes = wav_output.getvalue()
-        print(f"WAV-PCM konténer kész az ESP32-nek! Méret: {len(clean_wav_bytes)} bájt.")
-        
-        return send_file(
-            io.BytesIO(clean_wav_bytes),
-            mimetype='application/octet-stream'
-        )
+            # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, nyers, lineáris PCM bájtokat kapjon
+            if len(audio_bytes) > 44:
+                pcm_only = audio_bytes[44:]
+                return send_file(io.BytesIO(pcm_only), mimetype='application/octet-stream')
+            
+            return send_file(io.BytesIO(audio_bytes), mimetype='application/octet-stream')
+        else:
+            # Ha a modell mégis szöveggel válaszolt, kiírjuk a logba az okát
+            print("A Gemini nem adott vissza hangot. Szöveg: ", response.text)
+            return "HIBA: Nem erkezett hangvalasz a Google-tol.", 200
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
