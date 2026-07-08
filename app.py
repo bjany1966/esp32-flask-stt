@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from pathlib import Path
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 UPLOAD_DIR = Path("uploads")
@@ -16,9 +15,7 @@ def upload():
     if not data:
         return jsonify({"error": "no data"}), 400
 
-    filename = secure_filename("audio.raw")
-    path = UPLOAD_DIR / filename
-    with open(path, "wb") as f:
-        f.write(data)
+    path = UPLOAD_DIR / "audio.raw"
+    path.write_bytes(data)
 
-    return jsonify({"text": "teszt valasz", "saved": filename, "size": len(data)})
+    return jsonify({"text": "teszt valasz", "size": len(data)})
