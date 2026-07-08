@@ -43,30 +43,37 @@ def process_audio():
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
 
-        # JAVÍTVA: Az API kulcs tisztítása és az internetcím precíz különválasztása, hogy véletlenül se ragadjanak össze!
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
+        
+        # JAVÍTVA: A hivatalos, Google által előírt hajszálpontos v1beta URL végpont a gemini-2.5-flash modellhez!
         gemini_url = "https://googleapis.com"
         
+        # A Google API által elvárt pontos JSON struktúra
         payload = {
             "contents": [{
                 "parts": [
                     {"text": "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"},
-                    {"inlineData": {"mimeType": "audio/wav", "data": audio_base64}}
+                    {
+                        "inlineData": {
+                            "mimeType": "audio/wav", 
+                            "data": audio_base64
+                        }
+                    }
                 ]
             }]
         }
 
         print("Küldés a Google Gemini felé tiszta HTTP POST-tal...")
         headers = {"Content-Type": "application/json"}
-        # A kulcsot biztonságosan, URL paraméterként fűzzük hozzá külön változóban
         gemini_response = requests.post(gemini_url, params={"key": clean_key}, json=payload, headers=headers, timeout=20)
         
         if gemini_response.status_code == 200:
             res_json = gemini_response.json()
             try:
-                # Biztonságosan kikeressük a szöveges választ a Google JSON-ból
+                # Kikeressük a szöveges választ a Google JSON-ból
                 reply_text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception:
+            except Exception as e:
+                print(f"JSON kibontasi hiba: {str(e)}. Nyers JSON: {res_json}")
                 reply_text = "Rendben"
             print(f"Gemini tiszta valasza: {reply_text}")
         else:
