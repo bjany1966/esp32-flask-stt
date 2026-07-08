@@ -1,42 +1,41 @@
 import os
 import requests
-from flask import Flask, jsonify
+import base64
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# --- BIZTONSÁGOS BEÁLLÍTÁSOK ---
-ESP32_IP = "192.168.1.169"  # Az ESP32-S3 kártyád helyi IP címe
-
-# Az API kulcsot kizárólag a Render környezeti változóiból olvassuk be!
-# A GitHubra feltöltött kódban NEM szerepel a titkos kulcs.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 @app.route('/')
 def index():
-    return "Az STT / Gemini Központi Szerver Fut!"
+    return "A kozponti hangfeldolgozo szerver aktiv!"
 
-@app.route('/upload', methods=['POST', 'GET'])
-def trigger_and_process():
+@app.route('/upload', methods=['GET', 'POST'])
+def process_audio():
+    # Az ESP32 elküldi a saját belső IP-jét paraméterként (pl. 192.168.1.137)
+    esp32_ip = request.args.get('ip')
+    
+    if not esp32_ip:
+        return "Hianyzik az ESP32 IP cime.", 400
+        
+    if not GEMINI_API_KEY:
+        return "A GEMINI_API_KEY nincs beallitva a Renderen.", 500
+
     try:
-        # Biztonsági ellenőrzés: ha elfelejtetted beállítani a Renderen a kulcsot, figyelmeztet
-        if not GEMINI_API_KEY:
-            print("HIBA: A GEMINI_API_KEY környezeti változó nincs beállítva a Render.com-on!")
-            return "Szerveroldali konfiguracios hiba."
-
-        # 1. Lekérjük a nyers PCM hangfájlt az ESP32 helyi webszerverétől
-        print(f"Kapcsolódás az ESP32-höz: http://{ESP32_IP}/get_audio ...")
-        esp_response = requests.get(f"http://{ESP32_IP}/get_audio", timeout=10)
+        # Letöltjük a hangot az ESP32-től a kapott IP-cím alapján
+        esp_url = f"http://{esp32_ip}/get_audio"
+        print(f"Hang letoltese innen: {esp_url}")
+        esp_response = requests.get(esp_url, timeout=12)
         
         if esp_response.status_code != 200:
-            return jsonify({"status": "error", "message": "Az ESP32 még nem rögzített hangot."}), 400
-        
+            return "Az ESP32-n nem talalhato hangfajl.", 400
+            
         audio_data = esp_response.content
-        print(f"Hangfájl sikeresen letöltve az ESP-ről! Méret: {len(audio_data)} bájt.")
+        print(f"Sikeres letoltes! Meret: {len(audio_data)} bajt.")
 
-        # 2. Küldés közvetlenül a Google Gemini API-nak
+        # Beküldés a Google Gemini 1.5 Flash API-nak
         gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
-        
-        import base64
         audio_base64 = base64.b64encode(audio_data).decode('utf-8')
 
         payload = {
@@ -48,21 +47,18 @@ def trigger_and_process():
             }]
         }
 
-        headers = {"Content-Type": "application/json"}
-        print("Küldés a Gemini API-nak...")
-        gemini_response = requests.post(gemini_url, json=payload, headers=headers, timeout=15)
+        print("Kuldes a Gemini-nek...")
+        gemini_response = requests.post(gemini_url, json=payload, timeout=15)
         
         if gemini_response.status_code == 200:
-            res_json = gemini_response.json()
-            text_reply = res_json["candidates"]["content"]["parts"]["text"]
-            print(f"Gemini válasza: {text_reply}")
-            return text_reply
+            reply = gemini_response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            print(f"Sikeres valasz: {reply}")
+            return reply
         else:
-            print(f"Gemini Hiba: {gemini_response.text}")
-            return "Hiba a Gemini kapcsolatban."
+            return f"Gemini API hiba: {gemini_response.status_code}"
 
     except Exception as e:
-        print(f"Szerveroldali hiba: {str(e)}")
+        print(f"Hiba: {str(e)}")
         return "Szerveroldali hiba tortent."
 
 if __name__ == '__main__':
