@@ -53,11 +53,10 @@ def process_audio():
             
         print(f"Sikeresen beerkezett a PCM hang az ESP-rol! Meret: {len(pcm_data)} bajt.")
 
-        # Átalakítás univerzális WAV formátummá, amit az API 100%, hogy elfogad
+        # Átalakítás univerzális WAV formátummá
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         print(f"WAV konverzio kész. Új méret fejléccel: {len(wav_data)} bájt.")
 
-        # Hang előkészítése a megfelelő mime-típussal (audio/wav)
         audio_part = types.Part.from_bytes(
             data=wav_data,
             mime_type="audio/wav"
@@ -65,9 +64,10 @@ def process_audio():
 
         print("Kuldes a Gemini API-nak a hivatalos Google SDK-val...")
         
-        # A legújabb általános modell hívása, ami stabilan kezeli az audio tartalmakat
+        # FRISSÍTVE: gemini-1.5-flash helyett az új generációs gemini-2.5-flash modellt hívjuk meg,
+        # amit az új SDK és a v1beta protokoll is natívan, hibátlanul támogat!
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=[
                 "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
                 audio_part
