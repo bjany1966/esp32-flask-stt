@@ -1,6 +1,7 @@
 import os
 import io
 import wave
+import base64
 import requests
 from flask import Flask, request, send_file
 
@@ -27,43 +28,72 @@ def index():
 def process_audio():
     global latest_mp3_bytes
     if not GEMINI_API_KEY: 
-        return "HIBA: Hianyzik a Gemini kulcs", 500
+        print("HIBA: Hianyzik a GEMINI_API_KEY a Render beallitasaibol.")
+        return "HIBA: Hianyzik az API kulcs.", 200
+        
     try:
         pcm_data = request.data
-        if not pcm_data: return "Ures hang", 400
+        if not pcm_data or len(pcm_data) < 1000:
+            print("HIBA: Ures vagy hibas hang jott az ESP-rol.")
+            return "HIBA: Ures hang", 200
         
         print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
 
-        # 1. Gemini szöveges kérés (ez ingyenesen és sziklaszilárdan működik)
-        wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=str(GEMINI_API_KEY).strip())
-        
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=["Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, max 4-5 szoban!", types.Part.from_bytes(data=wav_data, mime_type="audio/wav")]
-        )
-        reply_text = response.text.strip() if response.text else "Rendben"
-        print(f"Gemini valasz: {reply_text}")
+        # 1. Mikrofon PCM -> WAV konverzió a Gemini bemenetéhez
+        wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
+        audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
 
-        # 2. TTS kérés a Google Translate-től (Standard, tökéletes MP3)
+        # 2. Közvetlen HTTP kérést indítunk a Google felé (ZÉRÓ SDK FÜGGŐSÉG!)
+        # Így elkerüljük az SDK belső függvény- és importálási hibáit!
+        gemini_url = f"https://googleapis.com{GEMINI_API_KEY}"
+        
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"},
+                    {"inlineData": {"mimeType": "audio/wav", "data": audio_base64}}
+                ]
+            }]
+        }
+
+        print("Küldés a Google Gemini felé tiszta HTTP POST-tal...")
+        headers = {"Content-Type": "application/json"}
+        gemini_response = requests.post(gemini_url, json=payload, headers=headers, timeout=20)
+        
+        if gemini_response.status_code == 200:
+            res_json = gemini_response.json()
+            try:
+                # Biztonságosan kikeressük a szöveges választ a Google JSON-ból
+                reply_text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                reply_text = "Rendben"
+            print(f"Gemini tiszta valasza: {reply_text}")
+        else:
+            print(f"Google API Hiba: {gemini_response.text}")
+            return f"HIBA: Google hiba ({gemini_response.status_code})", 200
+
+        # 3. TTS kérés a Google Translate-től (Standard, tökéletes MP3)
         tts_url = "https://google.com"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers_tts = {"User-Agent": "Mozilla/5.0"}
         params = {"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}
         
-        tts_res = requests.get(tts_url, params=params, headers=headers, timeout=10)
+        print("Válaszhang generálása a Google TTS-sel...")
+        tts_res = requests.get(tts_url, params=params, headers=headers_tts, timeout=12)
+        
         if tts_res.status_code == 200:
             latest_mp3_bytes = tts_res.content
             print(f"Tiszta MP3 elmentve a szerver memóriájába: {len(latest_mp3_bytes)} bájt.")
             return "OK"
-        return "TTS hiba", 500
+        else:
+            print(f"HIBA: TTS hiba, status: {tts_res.status_code}")
+            return "HIBA: TTS hiba", 200
+            
     except Exception as e:
-        print(str(e))
-        return "Szerver hiba", 500
+        print(f"Sulyos hiba a szerveren: {str(e)}")
+        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
+        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 # Ezen a végponton keresztül az ESP32 tiszta HTTP-n (SSL nélkül) éri el a hangot!
-# Ez megszünteti az SSL miatti 720 KB-os pufferigényt és az OOM hibát!
 @app.route('/get_audio_stream.mp3', methods=['GET'])
 def get_audio_stream():
     global latest_mp3_bytes
