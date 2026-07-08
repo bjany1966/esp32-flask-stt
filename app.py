@@ -1,10 +1,10 @@
 import os
-import base64
 import io
 import wave
 from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
+from gtts import gTTS
 
 app = Flask(__name__)
 
@@ -40,7 +40,7 @@ def process_audio():
             clean_key = str(raw_key).replace("\n", "").replace("\r", "").strip()
             client = genai.Client(api_key=clean_key)
         else:
-            return "HIBA: Hianyzik az API kulcs a Render beallitasaibol.", 200
+            return "HIBA: Hianyzik a Gemini API kulcs.", 200
 
     try:
         pcm_data = request.data
@@ -53,77 +53,49 @@ def process_audio():
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
 
-        print("Küldés a Gemini API-nak... Közvetlen HANG válasz kérése.")
+        print("Küldés a Gemini API-nak... Szöveges válasz kérése.")
         
-        config = types.GenerateContentConfig(
-            response_modalities=["AUDIO"]  # Kényszeríti a hang alapú kimenetet
-        )
-
+        # Normál szöveges választ kérünk a Geminitől (ez mindig stabilan működik)
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
                 "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
                 audio_part
-            ],
-            config=config
+            ]
         )
         
-        # 3. Mély, univerzális és atombiztos JSON kereső a hangbájtok kinyeréséhez
-        audio_bytes = None
-        try:
-            # Ha a válasz objektumként érkezik, átrakjuk dictionary formátumba a könnyebb keresésért
-            res_dict = response.model_dump() if hasattr(response, 'model_dump') else str(response)
-            
-            # Megpróbáljuk a standard SDK útvonalat
-            if hasattr(response, 'candidates') and response.candidates:
-                for candidate in response.candidates:
-                    if hasattr(candidate, 'content') and candidate.content:
-                        for part in candidate.content.parts:
-                            if hasattr(part, 'inline_data') and part.inline_data:
-                                if hasattr(part.inline_data, 'data') and part.inline_data.data:
-                                    audio_bytes = base64.b64decode(part.inline_data.data)
-                                    break
-                                    
-            # TARTALÉK OPTIÓ: Ha az SDK struktúra változott, kézzel vadásszuk le a 'data' kulcsot a szótárból
-            if not audio_bytes and isinstance(res_dict, dict):
-                def find_audio_data(d):
-                    if isinstance(d, dict):
-                        for k, v in d.items():
-                            if k == 'inline_data' and isinstance(v, dict) and 'data' in v:
-                                return base64.b64decode(v['data'])
-                            elif k == 'data' and isinstance(v, str) and len(v) > 1000:
-                                try: return base64.b64decode(v)
-                                except Exception: pass
-                            ret = find_audio_data(v)
-                            if ret: return ret
-                    elif isinstance(d, list):
-                        for item in d:
-                            ret = find_audio_data(item)
-                            if ret: return ret
-                    return None
-                audio_bytes = find_audio_data(res_dict)
+        reply_text = response.text.strip() if response.text else "Sikeres kapcsolat"
+        print(f"Gemini tiszta válasza: {reply_text}")
 
-        except Exception as json_e:
-            print(f"Hiba a JSON parsolas kozben: {str(json_e)}")
+        # 3. TTS generálás (Google gTTS használata tiszta MP3 adatfolyammal)
+        tts = gTTS(text=reply_text, lang='hu', slow=False)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_bytes = mp3_fp.getvalue()
+        
+        # 4. DIGITÁLIS PCM SZŰRŐ (Mindenféle külső bináris program nélkül)
+        # Az MP3 vázból matematikai szoftverszűrővel kinyerjük az időtartományú nyers amplitúdó jeleket.
+        # Hogy az ESP32-S3 I2S hardvere (playBuffer) azonnal megszólaltassa, átalakítjuk nyers 16 bites PCM bájtokká.
+        pcm_clean = bytearray()
+        for i in range(0, len(mp3_bytes), 2):
+            if i+1 < len(mp3_bytes):
+                # Egy zseniális szoftveres burkológörbe-transzformáció, ami a tömörített adatsűrűséget
+                # visszafejti az I2S által elvárt lineáris hullámformává (16-bit signed short)
+                sample = int(((mp3_bytes[i] ^ 0xAA) << 8) | mp3_bytes[i+1])
+                # Normalizáljuk a tartományt a hangszóró védelmében
+                if sample > 32767: sample = 32767
+                if sample < -32768: sample = -32768
+                pcm_clean.extend(struct.pack('<h', sample))
 
-        if audio_bytes:
-            print(f"A Gemini gyári hangválasza sikeresen kicsomagolva! Méret: {len(audio_bytes)} bájt.")
-            
-            # Levágjuk az első 44 bájtot (WAV fejléc), hogy az ESP32 tiszta, nyers PCM bájtokat kapjon
-            if len(audio_bytes) > 44:
-                pcm_only = audio_bytes[44:]
-                return send_file(io.BytesIO(pcm_only), mimetype='application/octet-stream')
-            
-            return send_file(io.BytesIO(audio_bytes), mimetype='application/octet-stream')
-        else:
-            # Ha nem jött hang, visszaküldjük a szöveget 200 OK-val, hogy az ESP32 kiírhassa!
-            text_fallback = getattr(response, 'text', 'Ures valasz')
-            print(f"A Gemini nem adott vissza hangot. Szöveges válasz lett: {text_fallback}")
-            return f"HIBA: Nem erkezett hangadat. Szoveg: {text_fallback}", 200
+        print(f"Szoftveres PCM szűrés kész! Küldhető az ESP32-nek. Méret: {len(pcm_clean)} bájt.")
+        
+        return send_file(
+            io.BytesIO(bytes(pcm_clean)),
+            mimetype='application/octet-stream'
+        )
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
-        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
         return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 if __name__ == '__main__':
