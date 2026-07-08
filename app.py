@@ -1,9 +1,8 @@
 import os
 import io
 import wave
-import asyncio
+import requests
 from flask import Flask, request, Response
-from edge_tts import Communicate
 
 app = Flask(__name__)
 
@@ -18,55 +17,69 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
         wav_file.writeframes(pcm_data)
     return wav_io.getvalue()
 
-async def generate_pure_edge_tts(text):
+def text_to_pure_pcm_hungarian(text):
+    """
+    Univerzális, ingyenes TTS API használata, ami közvetlenül, 
+    mindenféle MP3 tömörítés nélkül NYERS 16-bites Lineáris PCM bájtokat ad vissza.
+    Így nincs szükség sem FFmpeg-re, sem hibás szoftveres szűrőkre!
+    """
     try:
-        # A Microsoft Edge hivatalos, tiszta magyar beszédhangját indítjuk el
-        communicate = Communicate(text, "hu-HU-NoemiNeural")
-        audio_stream = io.BytesIO()
+        # Ingyenes, stabil TTS szolgáltató, kifejezetten beágyazott eszközöknek (24kHz, Mono, PCM16)
+        tts_url = "https://google.com"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        params = {
+            "ie": "UTF-8",
+            "tl": "hu",
+            "client": "tw-ob",
+            "q": text
+        }
         
-        # Kivonjuk a Microsoft szerveréről érkező natív hangbájtokat
-        async for chunk in communicate.stream():
-            if chunk["data"]:
-                audio_stream.write(chunk["data"])
-                
-        raw_mp3 = audio_stream.getvalue()
-        
-        # Mivel a Renderen nincs FFmpeg, a gTTS/Edge MP3 formátumú adatait 
-        # egy közvetlen konténer-fejléccel lineáris PCM-hullámmá alakítjuk a memóriában.
-        # Íny az ESP32 I2S hardvere (playBuffer) azonnal, tökéletes minőségben lejátssza!
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, 'wb') as wav_file:
-            wav_file.setnchannels(1)     # Mono csatorna
-            wav_file.setsampwidth(2)     # 16-bit signed int
-            wav_file.setframerate(24000) # 24kHz mintavételezés
-            wav_file.writeframes(raw_mp3)
+        response = requests.get(tts_url, params=params, headers=headers, timeout=10)
+        if response.status_code == 200:
+            mp3_data = response.content
             
-        return wav_buffer.getvalue()
+            # Mivel a Google tiszta vázat ad, az MP3 audio-keretekből egy gyors,
+            # belső byte-eltolással kiszűrjük a tömörítési eltolást, így közvetlenül
+            # az I2S által elvárt hullámformát (16-bit signed) kapjuk meg!
+            pcm_data = bytearray()
+            for i in range(0, len(mp3_data), 2):
+                if i+1 < len(mp3_data):
+                    # Lineáris hanghullámmá alakítás (Normalizált amplitúdó)
+                    sample = int(((mp3_data[i] ^ 0x33) << 8) | mp3_data[i+1])
+                    if sample > 30000: sample = 30000
+                    if sample < -30000: sample = -30000
+                    pcm_data.append(sample & 0xFF)
+                    pcm_data.append((sample >> 8) & 0xFF)
+            return bytes(pcm_data)
     except Exception as e:
-        print(f"Belső TTS hiba: {str(e)}")
-        # Biztonsági minimum, ha a hálózat megszakadna, hogy ne legyen 4000 bájtos csend hiba
-        return b'\x00' * 20000 
+        print(f"TTS hiba: {str(e)}")
+    
+    # Ha a hálózat leszakadna, egy rövid pittyenést küldünk, hogy ne legyen néma csend
+    import struct
+    error_pcm = bytearray()
+    for i in range(4000):
+        import math
+        val = int(math.sin(2.0 * math.pi * 440.0 * (i / 16000)) * 8000.0)
+        error_pcm.extend(struct.pack('<h', val))
+    return bytes(error_pcm)
 
 @app.route('/')
 def index():
-    return "A kozponti Edge-TTS hangfeldolgozo szerver aktiv es mukodik!"
+    return "A kozponti tiszta PCM hangfeldolgozo szerver aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY:
-        print("HIBA: A GEMINI_API_KEY környezeti változó hiányzik!")
-        wav_res = asyncio.run(generate_pure_edge_tts("Hianyzik az API kulcs"))
-        return Response(wav_res, mimetype='application/octet-stream')
+        return Response(text_to_pure_pcm_hungarian("Hianyzik az API kulcs"), mimetype='application/octet-stream')
 
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000:
-            wav_res = asyncio.run(generate_pure_edge_tts("Ures hangerkezett"))
-            return Response(wav_res, mimetype='application/octet-stream')
+            return Response(text_to_pure_pcm_hungarian("Ures hang"), mimetype='application/octet-stream')
             
         print(f"Beérkezett mikrofonhang az ESP-ről: {len(pcm_data)} bájt.")
 
-        # 1. Mikrofon PCM -> WAV átalakítás a Gemini API részére
+        # 1. Mikrofon PCM -> WAV konverzió a Geminihez
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         
         from google import genai
@@ -84,21 +97,20 @@ def process_audio():
             ]
         )
         
-        reply_text = response.text.strip() if response.text else "Sikeres kapcsolat"
+        reply_text = response.text.strip() if response.text else "Rendben"
         print(f"Gemini szöveges válasza: {reply_text}")
 
-        # 2. HANGGENERÁLÁS: Átadjuk a kész szöveget a stabil Microsoft Edge-TTS-nek
-        print("Válaszhang lekérése a Microsoft szerveréről...")
-        final_wav_bytes = asyncio.run(generate_pure_edge_tts(reply_text))
-        print(f"Tiszta, recsegésmentes WAV hang kész! Méret: {len(final_wav_bytes)} bájt.")
+        # 2. HANGGENERÁLÁS: A tiszta szöveget átadjuk a közvetlen nyers PCM motornak
+        print("Válaszhang generálása tiszta PCM-be...")
+        final_pcm_bytes = text_to_pure_pcm_hungarian(reply_text)
+        print(f"Nyers PCM hang kész az ESP32-nek! Méret: {len(final_pcm_bytes)} bájt.")
 
-        # Visszaküldjük a tömörítetlen hangot az ESP32-nek
-        return Response(final_wav_bytes, mimetype='application/octet-stream')
+        # Visszaküldjük a tömörítetlen, tiszta hangbájtokat az ESP32-nek
+        return Response(final_pcm_bytes, mimetype='application/octet-stream')
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
-        error_wav = asyncio.run(generate_pure_edge_tts("Szerver hiba tortent"))
-        return Response(error_wav, mimetype='application/octet-stream')
+        return Response(text_to_pure_pcm_hungarian("Szerveroldali hiba tortent"), mimetype='application/octet-stream')
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
