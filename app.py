@@ -1,12 +1,16 @@
 import os
-import requests
 import base64
 from flask import Flask, request
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 
-# A kulcsot a Render környezeti változóiból olvassuk be
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# A hivatalos Google kliens inicializálása a Render környezeti változóból
+# Fontos: A kliens automatikusan a GEMINI_API_KEY nevű változót keresi!
+client = None
+if os.environ.get("GEMINI_API_KEY"):
+    client = genai.Client()
 
 @app.route('/')
 def index():
@@ -14,11 +18,18 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
-    if not GEMINI_API_KEY:
-        print("HIBA: A GEMINI_API_KEY nincs beallitva a Renderen.")
-        return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
+    global client
+    
+    # Ha indításkor nem volt meg a kulcs, megpróbáljuk újra beolvasni
+    if not client:
+        if os.environ.get("GEMINI_API_KEY"):
+            client = genai.Client()
+        else:
+            print("HIBA: A GEMINI_API_KEY nincs beallitva a Renderen.")
+            return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
 
     try:
+        # Beérkező nyers bájtok fogadása az ESP32-ről
         audio_data = request.data
         if not audio_data or len(audio_data) < 1000:
             print(f"HIBA: Tul rovid adat erkezett! Meret: {len(audio_data)} bajt.")
@@ -26,50 +37,34 @@ def process_audio():
             
         print(f"Sikeresen beerkezett a hang az ESP-rol! Meret: {len(audio_data)} bajt.")
 
-        # FRISSÍTVE: A leginkább elfogadott, stabilabb URL struktúra és a specifikus modellnév használata
-        gemini_url = "https://googleapis.com"
-        
-        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+        # Hang előkészítése a hivatalos Google formátumra
+        audio_part = types.Part.from_bytes(
+            data=audio_data,
+            mime_type="audio/pcm;rate=16000"
+        )
 
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!"},
-                    {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": audio_base64}}
-                ]
-            }]
-        }
-
-        # Biztosítjuk, hogy semmilyen láthatatlan karakter ne zavarja az API kulcsot
-        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
-        params = {"key": clean_key}
-        headers = {"Content-Type": "application/json"}
+        print("Kuldes a Gemini API-nak a hivatalos Google SDK-val...")
         
-        print("Kuldes a Gemini API-nak...")
-        gemini_response = requests.post(gemini_url, params=params, json=payload, headers=headers, timeout=15)
+        # Tartalom generálása a hivatalos és legújabb v1-es metódussal
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=[
+                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
+                audio_part
+            ]
+        )
         
-        if gemini_response.status_code != 200:
-            print(f"Gemini API hiba: {gemini_response.status_code} - {gemini_response.text}")
-            return f"HIBA: Gemini hiba ({gemini_response.status_code}). Valasz: {gemini_response.text[:80]}", 200
-
-        res_json = gemini_response.json()
-        print(f"Nyers Gemini valasz: {res_json}")
-        
-        # Biztonságos JSON kibontás ellenőrzésekkel
-        if "candidates" in res_json and len(res_json["candidates"]) > 0:
-            candidate = res_json["candidates"][0] # Javított indexelés a JSON listához
-            if "content" in candidate and "parts" in candidate["content"] and len(candidate["content"]["parts"]) > 0:
-                part = candidate["content"]["parts"][0] # Javított indexelés a JSON listához
-                if "text" in part:
-                    reply = part["text"].strip()
-                    print(f"Sikeres kibontas! Valasz: {reply}")
-                    return reply
-
-        return "HIBA: A Gemini valasza ures vagy rossz formatumu.", 200
+        if response.text:
+            reply = response.text.strip()
+            print(f"Sikeres Gemini valasz: {reply}")
+            return reply
+        else:
+            print(f"Üres válasz érkezett a Geminitől: {response}")
+            return "HIBA: A Gemini valasza ures volt.", 200
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
-        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
+        return f"HIBA: Google SDK hiba: {str(e)}", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
