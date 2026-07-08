@@ -45,7 +45,7 @@ def process_audio():
 
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
         
-        # JAVÍTVA: A hivatalos, Google által előírt hajszálpontos v1beta URL végpont a gemini-2.5-flash modellhez!
+        # JAVÍTVA: A Google által előírt hajszálpontos v1beta URL végpont a gemini-2.5-flash modellhez!
         gemini_url = "https://googleapis.com"
         
         # A Google API által elvárt pontos JSON struktúra
