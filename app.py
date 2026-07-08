@@ -2,9 +2,11 @@ import os
 import base64
 import io
 import wave
-from flask import Flask, request
+from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
+from gtts import gTTS
+from pydub import AudioSegment
 
 app = Flask(__name__)
 
@@ -19,7 +21,6 @@ if GEMINI_API_KEY:
         print(f"Kliens inditasi hiba: {str(e)}")
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
-    """Nyers PCM bájtok átalakítása szabványos WAV formátummá a memóriában."""
     wav_io = io.BytesIO()
     with wave.open(wav_io, 'wb') as wav_file:
         wav_file.setnchannels(channels)
@@ -35,37 +36,26 @@ def index():
 @app.route('/upload', methods=['POST'])
 def process_audio():
     global client
-    
     if not client:
         raw_key = os.environ.get("GEMINI_API_KEY")
         if raw_key:
             clean_key = str(raw_key).replace("\n", "").replace("\r", "").strip()
             client = genai.Client(api_key=clean_key)
         else:
-            print("HIBA: A GEMINI_API_KEY nincs beallitva a Renderen.")
-            return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
+            return "Hianyzik az API kulcs.", 500
 
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000:
-            print(f"HIBA: Tul rovid adat erkezett! Meret: {len(pcm_data)} bajt.")
-            return "HIBA: Tul rovid vagy ures hangfajl erkezett.", 200
+            return "Ures vagy hibas hangfajl.", 400
             
-        print(f"Sikeresen beerkezett a PCM hang az ESP-rol! Meret: {len(pcm_data)} bajt.")
+        print(f"Beérkezett mikrofonhang: {len(pcm_data)} bájt.")
 
-        # Átalakítás univerzális WAV formátummá
+        # 1. PCM -> WAV konverzió a Geminihez
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
-        print(f"WAV konverzio kész. Új méret fejléccel: {len(wav_data)} bájt.")
+        audio_part = types.Part.from_bytes(data=wav_data, mime_type="audio/wav")
 
-        audio_part = types.Part.from_bytes(
-            data=wav_data,
-            mime_type="audio/wav"
-        )
-
-        print("Kuldes a Gemini API-nak a hivatalos Google SDK-val...")
-        
-        # FRISSÍTVE: gemini-1.5-flash helyett az új generációs gemini-2.5-flash modellt hívjuk meg,
-        # amit az új SDK és a v1beta protokoll is natívan, hibátlanul támogat!
+        # 2. Gemini 2.5 Flash lekérdezés
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
@@ -74,17 +64,31 @@ def process_audio():
             ]
         )
         
-        if response.text:
-            reply = response.text.strip()
-            print(f"Sikeres Gemini valasz: {reply}")
-            return reply
-        else:
-            print(f"Ures valasz erkezett a Geminitol: {response}")
-            return "HIBA: A Gemini valasza ures volt.", 200
+        reply_text = response.text.strip() if response.text else "Sikeres kapcsolat"
+        print(f"Gemini válasza: {reply_text}")
+
+        # 3. TTS (Szövegből beszéd generálása magyarul)
+        tts = gTTS(text=reply_text, lang='hu', slow=False)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+
+        # 4. MP3 átalakítása az ESP32 hangszórójának megfelelő nyers 24000Hz PCM formátumra
+        audio = AudioSegment.from_file(mp3_fp, format="mp3")
+        audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2) # 24kHz, Mono, 16-bit (2 bájt/minta)
+        
+        raw_output = audio.raw_data
+        print(f"Válaszhang legenerálva! Méret: {len(raw_output)} bájt.")
+
+        # Visszaküldjük a nyers hangbájtokat az ESP32-nek lejátszásra
+        return send_file(
+            io.BytesIO(raw_output),
+            mimetype='application/octet-stream'
+        )
 
     except Exception as e:
         print(f"Hiba a szerveren: {str(e)}")
-        return f"HIBA: Google SDK hiba: {str(e)}", 200
+        return f"Szerver hiba: {str(e)}", 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
