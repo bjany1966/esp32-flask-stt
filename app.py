@@ -18,4 +18,4 @@ def upload():
     path = UPLOAD_DIR / "audio.raw"
     path.write_bytes(data)
 
-    return jsonify({"text": "teszt valasz", "size": len(data)})
+    return jsonify({"text": "sikeres feltoltes", "size": len(data)})
