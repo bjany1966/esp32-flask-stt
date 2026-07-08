@@ -5,7 +5,7 @@ from flask import Flask, request
 
 app = Flask(__name__)
 
-# A kulcsot a Render környezeti változóiból olvassuk be (NEM publikus GitHubra!)
+# A kulcsot a Render környezeti változóiból olvassuk be
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 @app.route('/')
@@ -19,7 +19,6 @@ def process_audio():
         return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
 
     try:
-        # Beérkező nyers bájtok fogadása
         audio_data = request.data
         if not audio_data or len(audio_data) < 1000:
             print(f"HIBA: Tul rovid adat erkezett! Meret: {len(audio_data)} bajt.")
@@ -27,10 +26,7 @@ def process_audio():
             
         print(f"Sikeresen beerkezett a hang az ESP-rol! Meret: {len(audio_data)} bajt.")
 
-        # BIZTONSÁGOS FIX URL ÖSSZEÁLLÍTÁS:
-        # Tisztítjuk az API kulcsot, ha esetleg szóköz vagy felesleges karakter került volna bele
-        clean_key = str(GEMINI_API_KEY).strip()
-        
+        # FRISSÍTVE: v1beta helyett a stabil v1-es vegvonalat hasznaljuk a 404 hiba ellen!
         gemini_url = "https://googleapis.com"
         
         audio_base64 = base64.b64encode(audio_data).decode('utf-8')
@@ -38,13 +34,13 @@ def process_audio():
         payload = {
             "contents": [{
                 "parts": [
-                    {"text": "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul!"},
+                    {"text": "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!"},
                     {"inlineData": {"mimeType": "audio/pcm;rate=16000", "data": audio_base64}}
                 ]
             }]
         }
 
-        # Az API kulcsot biztonságosan, query paraméterként fűzzük hozzá a tiszta Google címhez
+        clean_key = str(GEMINI_API_KEY).strip()
         params = {"key": clean_key}
         headers = {"Content-Type": "application/json"}
         
@@ -53,12 +49,12 @@ def process_audio():
         
         if gemini_response.status_code != 200:
             print(f"Gemini API hiba: {gemini_response.status_code} - {gemini_response.text}")
-            return f"HIBA: Gemini API hibat dobott ({gemini_response.status_code}). Válasz: {gemini_response.text[:100]}", 200
+            return f"HIBA: Gemini hiba ({gemini_response.status_code}). Valasz: {gemini_response.text[:80]}", 200
 
         res_json = gemini_response.json()
         print(f"Nyers Gemini valasz: {res_json}")
         
-        # Biztonságos JSON kibontás lépésről lépésre
+        # Szigorú és biztonságos JSON ellenőrzés a válasz kibontásához
         if "candidates" in res_json and len(res_json["candidates"]) > 0:
             candidate = res_json["candidates"][0]
             if "content" in candidate and "parts" in candidate["content"] and len(candidate["content"]["parts"]) > 0:
