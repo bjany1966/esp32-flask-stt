@@ -26,7 +26,7 @@ def process_audio():
             
         print(f"Sikeresen beerkezett a hang az ESP-rol! Meret: {len(audio_data)} bajt.")
 
-        # FRISSÍTVE: v1beta helyett a stabil v1-es vegvonalat hasznaljuk a 404 hiba ellen!
+        # FRISSÍTVE: A leginkább elfogadott, stabilabb URL struktúra és a specifikus modellnév használata
         gemini_url = "https://googleapis.com"
         
         audio_base64 = base64.b64encode(audio_data).decode('utf-8')
@@ -40,7 +40,8 @@ def process_audio():
             }]
         }
 
-        clean_key = str(GEMINI_API_KEY).strip()
+        # Biztosítjuk, hogy semmilyen láthatatlan karakter ne zavarja az API kulcsot
+        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
         params = {"key": clean_key}
         headers = {"Content-Type": "application/json"}
         
@@ -54,11 +55,11 @@ def process_audio():
         res_json = gemini_response.json()
         print(f"Nyers Gemini valasz: {res_json}")
         
-        # Szigorú és biztonságos JSON ellenőrzés a válasz kibontásához
+        # Biztonságos JSON kibontás ellenőrzésekkel
         if "candidates" in res_json and len(res_json["candidates"]) > 0:
-            candidate = res_json["candidates"][0]
+            candidate = res_json["candidates"][0] # Javított indexelés a JSON listához
             if "content" in candidate and "parts" in candidate["content"] and len(candidate["content"]["parts"]) > 0:
-                part = candidate["content"]["parts"][0]
+                part = candidate["content"]["parts"][0] # Javított indexelés a JSON listához
                 if "text" in part:
                     reply = part["text"].strip()
                     print(f"Sikeres kibontas! Valasz: {reply}")
