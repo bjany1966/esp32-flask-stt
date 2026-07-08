@@ -6,7 +6,6 @@ from flask import Flask, request, send_file
 from google import genai
 from google.genai import types
 from gtts import gTTS
-from pydub import AudioSegment
 
 app = Flask(__name__)
 
@@ -72,18 +71,14 @@ def process_audio():
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
         mp3_fp.seek(0)
-
-        # 4. MP3 átalakítása az ESP32 hangszórójának megfelelő nyers 24000Hz PCM formátumra
-        audio = AudioSegment.from_file(mp3_fp, format="mp3")
-        audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2) # 24kHz, Mono, 16-bit (2 bájt/minta)
         
-        raw_output = audio.raw_data
-        print(f"Válaszhang legenerálva! Méret: {len(raw_output)} bájt.")
+        raw_output = mp3_fp.getvalue()
+        print(f"Válaszhang (MP3) kész! Méret: {len(raw_output)} bájt.")
 
-        # Visszaküldjük a nyers hangbájtokat az ESP32-nek lejátszásra
+        # Visszaküldjük a tiszta MP3 adatfolyamot az ESP32-nek
         return send_file(
             io.BytesIO(raw_output),
-            mimetype='application/octet-stream'
+            mimetype='audio/mpeg'
         )
 
     except Exception as e:
