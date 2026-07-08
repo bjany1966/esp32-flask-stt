@@ -1,15 +1,25 @@
 import os
 import io
 import wave
-import base64
 import requests
 from flask import Flask, request, send_file
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # Átmeneti globális változó a legutolsó legenerált hang tárolására
 latest_mp3_bytes = b""
+
+# Inicializáljuk a klienst biztonságosan az SDK-val
+client = None
+if GEMINI_API_KEY:
+    try:
+        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
+        client = genai.Client(api_key=clean_key)
+    except Exception as e:
+        print(f"Kliens inditasi hiba: {str(e)}")
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
     wav_io = io.BytesIO()
@@ -26,59 +36,48 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
-    global latest_mp3_bytes
-    if not GEMINI_API_KEY: 
-        print("HIBA: Hianyzik a GEMINI_API_KEY a Render beallitasaibol.")
-        return "HIBA: Hianyzik az API kulcs.", 200
+    global latest_mp3_bytes, client
+    
+    if not client:
+        raw_key = os.environ.get("GEMINI_API_KEY")
+        if raw_key:
+            try:
+                clean_key = str(raw_key).replace("\n", "").replace("\r", "").strip()
+                client = genai.Client(api_key=clean_key)
+            except Exception as e:
+                return f"HIBA: Nem sikerült indítani a Google klienst: {str(e)}", 200
+        else:
+            return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
         
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000:
             print("HIBA: Ures vagy hibas hang jott az ESP-rol.")
-            return "HIBA: Ures hang", 200
+            return "HIBA: Ures hangfajl érkezett.", 200
         
-        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt. WAV konverzio...")
 
         # 1. Mikrofon PCM -> WAV konverzió a Gemini bemenetéhez
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
-        audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
+        
+        # JAVÍTVA: A hivatalos google-genai SDK szerinti pontos part-kezelés
+        audio_part = types.Part.from_bytes(
+            data=wav_bytes,
+            mime_type="audio/wav"
+        )
 
-        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
+        print("Küldés a Google Gemini felé a hivatalos SDK-val...")
+        # Kizárólag tiszta szöveges választ kérünk (ez az ingyenes szinten 100% stabil)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                "Valaszolj a hallott hangra tisztan magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!",
+                audio_part
+            ]
+        )
         
-        # JAVÍTVA: A Google által előírt hajszálpontos v1beta URL végpont a gemini-2.5-flash modellhez!
-        gemini_url = "https://googleapis.com"
-        
-        # A Google API által elvárt pontos JSON struktúra
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"},
-                    {
-                        "inlineData": {
-                            "mimeType": "audio/wav", 
-                            "data": audio_base64
-                        }
-                    }
-                ]
-            }]
-        }
-
-        print("Küldés a Google Gemini felé tiszta HTTP POST-tal...")
-        headers = {"Content-Type": "application/json"}
-        gemini_response = requests.post(gemini_url, params={"key": clean_key}, json=payload, headers=headers, timeout=20)
-        
-        if gemini_response.status_code == 200:
-            res_json = gemini_response.json()
-            try:
-                # Kikeressük a szöveges választ a Google JSON-ból
-                reply_text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception as e:
-                print(f"JSON kibontasi hiba: {str(e)}. Nyers JSON: {res_json}")
-                reply_text = "Rendben"
-            print(f"Gemini tiszta valasza: {reply_text}")
-        else:
-            print(f"Google API Hiba: {gemini_response.text}")
-            return f"HIBA: Google hiba ({gemini_response.status_code})", 200
+        reply_text = response.text.strip() if response.text else "Rendben"
+        print(f"Gemini tiszta válasza: {reply_text}")
 
         # 3. TTS kérés a Google Translate-től (Standard, tökéletes MP3)
         tts_url = "https://google.com"
@@ -94,11 +93,12 @@ def process_audio():
             return "OK"
         else:
             print(f"HIBA: TTS hiba, status: {tts_res.status_code}")
-            return "HIBA: TTS hiba", 200
+            return "HIBA: Nem sikerült a beszédhang legenerálása.", 200
             
     except Exception as e:
         print(f"Sulyos hiba a szerveren: {str(e)}")
-        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
+        # BIZTONSÁGI FIX: Kivétel esetén SEM dobunk 500-at, hanem visszaküldjük a hibát 200 OK-val!
+        return f"HIBA: Szerveroldali kivétel: {str(e)}", 200
 
 # Ezen a végponton keresztül az ESP32 tiszta HTTP-n (SSL nélkül) éri el a hangot!
 @app.route('/get_audio_stream.mp3', methods=['GET'])
