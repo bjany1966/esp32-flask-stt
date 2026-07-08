@@ -1,7 +1,6 @@
 import os
 import io
 import wave
-import urllib.parse
 import requests
 from flask import Flask, request, Response, stream_with_context
 
@@ -19,7 +18,7 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kozponti stabil darabolt PCM hangfeldolgozo aktiv!"
+    return "A kozponti stabil MP3 hangfeldolgozo aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
@@ -29,9 +28,9 @@ def process_audio():
         pcm_data = request.data
         if not pcm_data: return "Ures hang", 400
         
-        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
+        print(f"Mikrofonhang beerkezett az ESP-rol: {len(pcm_data)} bajt.")
 
-        # 1. Gemini szöveges kérés
+        # 1. Gemini kérés
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         from google import genai
         from google.genai import types
@@ -44,32 +43,25 @@ def process_audio():
         reply_text = response.text.strip() if response.text else "Rendben"
         print(f"Gemini valasz: {reply_text}")
 
-        # 2. KRISTÁLYTISZTA PCM HANGGENERÁLÁS: 
-        # A szöveget URL-kódoljuk, és egy olyan publikus TTS átalakítón küldjük át, 
-        # ami MP3 helyett gyárilag, natívan tömörítetlen LINEÁRIS PCM (16kHz, Mono, 16-bit) bájtokat ad vissza!
-        encoded_text = urllib.parse.quote(reply_text)
+        # 2. TTS kérés a Google Translate-től (Standard, korlátlan MP3)
+        tts_url = "https://google.com"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        params = {"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}
         
-        # Ingyenes, dedikált PCM-16 beszédhang-generátor URL
-        pcm_tts_url = f"https://voicerss.org{encoded_text}"
-        
-        print("Lekérés az online PCM hanggenerátortól...")
-        tts_res = requests.get(pcm_tts_url, timeout=12, stream=True)
+        tts_res = requests.get(tts_url, params=params, headers=headers, timeout=10, stream=True)
         
         if tts_res.status_code == 200:
-            # DARABOLT (CHUNKED) STREAM: 
-            # 1024 bájtos darabokban közvetlenül továbbítjuk a tiszta PCM bájtokat az ESP32-nek!
             def generate_chunks():
                 for chunk in tts_res.iter_content(chunk_size=1024):
                     if chunk:
                         yield chunk
-            
-            print("Kristálytiszta PCM hangstream indítása az ESP32 felé...")
-            return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
+            print("Darabolt MP3 hangstream inditasa az ESP32 felé...")
+            return Response(stream_with_context(generate_chunks()), mimetype='audio/mpeg')
             
         return "TTS hiba", 500
     except Exception as e:
         print(str(e))
-        return "Szerver Hiba", 500
+        return "Szerver hiba", 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
