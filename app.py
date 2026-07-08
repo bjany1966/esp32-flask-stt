@@ -1,5 +1,7 @@
 import os
 import base64
+import io
+import wave
 from flask import Flask, request
 from google import genai
 from google.genai import types
@@ -15,6 +17,16 @@ if GEMINI_API_KEY:
         client = genai.Client(api_key=clean_key)
     except Exception as e:
         print(f"Kliens inditasi hiba: {str(e)}")
+
+def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
+    """Nyers PCM bájtok átalakítása szabványos WAV formátummá a memóriában."""
+    wav_io = io.BytesIO()
+    with wave.open(wav_io, 'wb') as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(bits_per_sample // 8)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    return wav_io.getvalue()
 
 @app.route('/')
 def index():
@@ -34,23 +46,28 @@ def process_audio():
             return "HIBA: Hianyzik a Gemini API kulcs a Render beallitasaibol.", 200
 
     try:
-        audio_data = request.data
-        if not audio_data or len(audio_data) < 1000:
-            print(f"HIBA: Tul rovid adat erkezett! Meret: {len(audio_data)} bajt.")
+        pcm_data = request.data
+        if not pcm_data or len(pcm_data) < 1000:
+            print(f"HIBA: Tul rovid adat erkezett! Meret: {len(pcm_data)} bajt.")
             return "HIBA: Tul rovid vagy ures hangfajl erkezett.", 200
             
-        print(f"Sikeresen beerkezett a hang az ESP-rol! Meret: {len(audio_data)} bajt.")
+        print(f"Sikeresen beerkezett a PCM hang az ESP-rol! Meret: {len(pcm_data)} bajt.")
 
+        # Átalakítás univerzális WAV formátummá, amit az API 100%, hogy elfogad
+        wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
+        print(f"WAV konverzio kész. Új méret fejléccel: {len(wav_data)} bájt.")
+
+        # Hang előkészítése a megfelelő mime-típussal (audio/wav)
         audio_part = types.Part.from_bytes(
-            data=audio_data,
-            mime_type="audio/pcm;rate=16000"
+            data=wav_data,
+            mime_type="audio/wav"
         )
 
         print("Kuldes a Gemini API-nak a hivatalos Google SDK-val...")
         
-        # PONTOSÍTVA: A Google által elvárt 'models/' előtag hozzáadása a 404-es hiba ellen
+        # A legújabb általános modell hívása, ami stabilan kezeli az audio tartalmakat
         response = client.models.generate_content(
-            model='models/gemini-1.5-flash',
+            model='gemini-1.5-flash',
             contents=[
                 "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 5-6 szoban!",
                 audio_part
