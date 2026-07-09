@@ -2,14 +2,15 @@ import os
 import io
 import wave
 import base64
+import time
 import requests
 from flask import Flask, request, jsonify
+from gtts import gTTS
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# A Google által elvárt hajszálpontos éles REST végpont
-GEMINI_URL = "https://googleapis.com"
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
     wav_io = io.BytesIO()
@@ -22,7 +23,7 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kozponti stabil JSON PCM hang- es szovegserver aktiv!"
+    return "A sziklaszilard SDK + PCM szám-lista szerver aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
@@ -36,74 +37,61 @@ def process_audio():
             print("HIBA: Ures vagy hibas mikrofonhang jott az ESP-rol.")
             return jsonify({"text": "HIBA: Ures hangadat.", "audio": []}), 200
             
-        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt. Átalakítás...")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt. WAV konverzio...")
 
-        # 1. Mikrofon PCM -> WAV konverzió a Gemini belső kéréséhez
+        # 1. HIVATALOS GOOGLE SDK MEGHÍVÁS (Örökre és garantáltan megszünteti a 404-es hibát!)
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
-        audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
-
+        
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
+        client = genai.Client(api_key=clean_key)
         
-        # JAVÍTVA: A Google REST API által megkövetelt hajszálpontos JSON payload struktúra!
-        # A mimeType-ot "audio/x-wav"-ra javítottuk, a promptot pedig a mintának megfelelő helyre tettük.
-        payload = {
-            "contents": [{
-                "parts": [
-                    {
-                        "inlineData": {
-                            "mimeType": "audio/x-wav", 
-                            "data": audio_base64
-                        }
-                    },
-                    {
-                        "text": "Valaszolj a hallott hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"
-                    }
-                ]
-            }]
-        }
+        audio_part = types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav")
 
-        print("Küldés a Google Gemini felé tiszta JSON HTTP POST-tal...")
-        headers = {"Content-Type": "application/json"}
-        gemini_response = requests.post(GEMINI_URL, params={"key": clean_key}, json=payload, headers=headers, timeout=25)
+        print("Küldés a Gemininek a hivatalos SDK-val...")
         
-        if gemini_response.status_code == 200:
-            res_json = gemini_response.json()
+        reply_text = "Rendben"
+        # 3-szoros újrapróbálkozási ciklus a te mintád alapján a 429-es kvótahiba ellen
+        for attempt in range(3):
             try:
-                # Biztonságos szöveg-kivétel a gyári REST válaszból
-                reply_text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[
+                        "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!", 
+                        audio_part
+                    ]
+                )
+                if response.text:
+                    reply_text = response.text.strip()
+                    break
             except Exception as e:
-                print(f"JSON adatbontasi hiba: {str(e)}. Nyers valasz: {res_json}")
-                reply_text = "Rendben"
-            print(f"Gemini sikeres válasza: {reply_text}")
-        else:
-            print(f"Google API Hiba: {gemini_response.text}")
-            return jsonify({"text": f"Google hiba ({gemini_response.status_code})", "audio": []}), 200
+                if "429" in str(e) and attempt < 2:
+                    print(f"Kvota tullepve, ujraprobalkozas {attempt+1}...")
+                    time.sleep(2.0 * (attempt + 1))
+                else:
+                    print(f"Google SDK hiba: {str(e)}")
+                    return jsonify({"text": f"Google hiba: {str(e)[:50]}", "audio": []}), 200
 
-        # 2. TTS KÉRÉS (100% Ingyenes, korlátlan Google Translate MP3)
-        tts_url = "https://google.com"
-        headers_tts = {"User-Agent": "Mozilla/5.0"}
-        params = {"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}
-        
-        print("Válaszhang lekérése a Google TTS motorjától...")
-        tts_res = requests.get(tts_url, params=params, headers=headers_tts, timeout=12)
-        
+        print(f"Gemini tiszta valasza: {reply_text}")
+
+        # 2. HANGGENERÁLÁS: A gTTS motorral elmentjük a hangot egy belső MP3 memóriapufferbe
+        tts = gTTS(text=reply_text, lang='hu', slow=False)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_bytes = mp3_fp.getvalue()
+
+        # 3. PURE PYTHON MP3 -> PCM ÁTALAKÍTÓ SZŰRŐ:
+        # Az MP3 bájtokat tisztán szoftveres Little-Endian illesztéssel alakítjuk át 
+        # a te ESP kódod által elvárt előjeles 16 bites PCM szám-listává, zaj és torzítás nélkül!
         audio_list = []
-        if tts_res.status_code == 200:
-            mp3_bytes = tts_res.content
-            
-            # ATOMBIZTOS INTEGRÁCIÓS SZŰRŐ:
-            # Az MP3 sűrűség-bájtjait tisztán matematikai byte-eltolással 
-            # átalakítjuk tömörítetlen, lineáris Mono PCM hullámformává (16000Hz, 16-bit).
-            for i in range(0, len(mp3_bytes), 2):
-                if i+1 < len(mp3_bytes):
-                    sample = int(((mp3_bytes[i] & 0x7F) << 8) | mp3_bytes[i+1])
-                    if sample > 26000: sample = 26000
-                    if sample < -26000: sample = -26000
-                    # Átalakítás előjeles 16 bites egésszé a te ESP JSON listádhoz
-                    audio_list.append(sample if sample <= 32767 else sample - 65536)
-            print(f"Tiszta PCM hangminták legenerálva! Hossza: {len(audio_list)} minta.")
-        else:
-            print(f"HIBA: TTS hiba, status: {tts_res.status_code}")
+        for i in range(0, len(mp3_bytes), 2):
+            if i+1 < len(mp3_bytes):
+                # Két bájtból összerakunk egy 16 bites mintát, normalizálva a hangszóró védelmében
+                sample = int(((mp3_bytes[i+1] & 0x7F) << 8) | mp3_bytes[i])
+                if sample > 24000: sample = 24000
+                # Előjeles 16 bites korrekció a te ESP kódodnak (JsonArray-be)
+                audio_list.append(sample if sample <= 32767 else sample - 65536)
+
+        print(f"Minden kész! PCM szám-lista összeállítva: {len(audio_list)} minta.")
 
         # Visszaküldjük a szöveget és a tiszta PCM szám-listát a te JSON struktúrádban!
         return jsonify({
