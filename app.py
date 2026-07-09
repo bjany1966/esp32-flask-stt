@@ -195,11 +195,7 @@ def upload():
         )
 
 
-        reply = (
-            response.text.strip()
-            if response.text
-            else "Rendben"
-        )
+        reply = "Szia Janos, a rendszer mukodik"
 
 
         print(
@@ -226,6 +222,7 @@ def upload():
         pcm = mp3_to_pcm(
             mp3
         )
+        pcm = pcm[:60000]
 
 
         audio_list = pcm_to_list(
