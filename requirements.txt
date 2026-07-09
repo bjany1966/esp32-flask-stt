@@ -1,5 +1,4 @@
 flask
 gunicorn
 google-genai
-edge-tts
-numpy
+gtts
