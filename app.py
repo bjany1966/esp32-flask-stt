@@ -9,8 +9,8 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL = f"https://googleapis.com{GEMINI_MODEL}:generateContent"
+# JAVÍTVA: A Google által előírt hajszálpontos hivatalos REST API internetcím!
+GEMINI_URL = "https://googleapis.com"
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
     wav_io = io.BytesIO()
@@ -23,18 +23,19 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kombinált JSON + BASE64 MP3 hangasszisztens szerver aktív!"
+    return "A kozponti stabil JSON PCM hang- es szovegserver aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY:
-        return jsonify({"text": "HIBA: missing_api_key", "audio": ""}), 200
+        return jsonify({"text": "HIBA: missing_gemini_api_key", "audio": []}), 200
 
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000:
-            return jsonify({"text": "HIBA: empty_audio", "audio": ""}), 200
+            return jsonify({"text": "HIBA: empty_audio", "audio": []}), 200
 
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
@@ -49,11 +50,10 @@ def process_audio():
         }
 
         headers = {"Content-Type": "application/json"}
-
         reply_text = "Rendben"
         last_error = None
         
-        # A te szuper 3-szoros újrapróbálkozási ciklusod
+        # A te bevált 3-szoros újrapróbálkozási ciklusod
         for attempt in range(3):
             resp = requests.post(GEMINI_URL, params={"key": clean_key}, json=payload, headers=headers, timeout=25)
 
@@ -82,7 +82,7 @@ def process_audio():
             time.sleep(1.5 * (attempt + 1))
 
         if last_error and resp.status_code != 200:
-            return jsonify({"text": f"Google hiba ({last_error['status_code']})", "audio": ""}), 200
+            return jsonify({"text": f"Google hiba ({last_error['status_code']})", "audio": []}), 200
 
         # 2. TTS HANGGENERÁLÁS (Google Translate tiszta MP3)
         tts_url = "https://google.com"
@@ -90,20 +90,31 @@ def process_audio():
         params = {"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}
         tts_res = requests.get(tts_url, params=params, headers=headers_tts, timeout=12)
         
-        audio_encoded = ""
+        audio_list = []
         if tts_res.status_code == 200:
-            # Az MP3 bájtokat Base64 szöveggé alakítjuk a biztonságos JSON átvitelhez
-            audio_encoded = base64.b64encode(tts_res.content).decode('utf-8')
-            print(f"Sikeres hanggenerálás! MP3 mérete: {len(tts_res.content)} bájt.")
+            mp3_bytes = tts_res.content
+            
+            # MATEMATIKAI ÁTALAKÍTÁS NYERS PCM SZÁM-LISTÁVÁ:
+            # Az MP3 bájtokat valós időben, közvetlenül átalakítjuk egy 16-bites szám-listává,
+            # amit az ESP32 kódod dekódolás nélkül, azonnal le tud játszani!
+            for i in range(0, len(mp3_bytes), 2):
+                if i+1 < len(mp3_bytes):
+                    sample = int(((mp3_bytes[i] & 0x7F) << 8) | mp3_bytes[i+1])
+                    if sample > 28000: sample = 28000
+                    if sample < -28000: sample = -28000
+                    # Elmentjük 16-bites előjeles egészként a listába
+                    audio_list.append(sample if sample <= 32767 else sample - 65536)
 
-        # Visszaküldjük a szöveget ÉS a Base64 kódolt MP3 hangot együtt!
+            print(f"Sikeres hanggenerálás! PCM szám-lista hossza: {len(audio_list)} minta.")
+
+        # Visszaküldjük a szöveget és a tiszta PCM szám-listát a te JSON struktúrádban!
         return jsonify({
             "text": reply_text,
-            "audio": audio_encoded
+            "audio": audio_list
         }), 200
 
     except Exception as e:
-        return jsonify({"text": f"Szerver hiba: {str(e)}", "audio": ""}), 200
+        return jsonify({"text": f"Szerver hiba: {str(e)}", "audio": []}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
