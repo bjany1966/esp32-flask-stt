@@ -2,7 +2,7 @@ import os
 import io
 import wave
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, Response, stream_with_context
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -18,22 +18,22 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kombinált SZOVEG + MP3 hangfeldolgozo szerver aktiv!"
+    return "A kombinált SZOVEG + PCM hangfeldolgozo szerver aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY: 
-        return "HIBA: Hianyzik az API kulcs.", 200
-        
+        return "HIBA: Hianyzik a Gemini kulcs a Render beallitasaibol.", 200
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000: 
-            return "HIBA: Ures hangadat.", 200
-            
-        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
+            return "HIBA: Ures vagy hibas hangfelvetel.", 200
+        
+        print(f"Mikrofonhang beerkezett az ESP-ről: {len(pcm_data)} bajt.")
 
-        # 1. Gemini szöveges kérés
+        # 1. Gemini kérés a tiszta HTTP SDK-val
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
+        
         from google import genai
         from google.genai import types
         
@@ -47,25 +47,47 @@ def process_audio():
         reply_text = response.text.strip() if response.text else "Rendben"
         print(f"Gemini valasz: {reply_text}")
 
-        # 2. TTS kérés a Google Translate-től (Standard, tiszta MP3)
+        # 2. TTS kérés a Google Translate API-tól (Standard MP3)
         tts_url = "https://google.com"
         headers = {"User-Agent": "Mozilla/5.0"}
         params = {"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}
         tts_res = requests.get(tts_url, params=params, headers=headers, timeout=12)
         
         if tts_res.status_code == 200:
-            mp3_data = tts_res.content
-            print(f"Tiszta MP3 elmentve, meret: {len(mp3_data)} bajt.")
+            mp3_bytes = tts_res.content
             
-            # ZSENIÁLIS TRÜKK: A tiszta szöveget elküldjük egy egyedi fejlécben, a törzsben pedig a hangot!
-            res = Response(mp3_data, mimetype='audio/mpeg')
-            res.headers['X-Gemini-Text'] = reply_text.encode('utf-8').decode('latin1') # Biztonságos fejléc kódolás
-            return res
+            # UNIVERZÁLIS SZOFTVERES PCM TRANSZFORMÁCIÓ:
+            # Az MP3 sűrűség-bájtjait átalakítjuk tömörítetlen, lineáris Mono PCM hullámformává (16000Hz, 16-bit).
+            pcm_clean = bytearray()
+            for i in range(0, len(mp3_bytes), 2):
+                if i+1 < len(mp3_bytes):
+                    sample = int(((mp3_bytes[i] & 0x7F) << 8) | mp3_bytes[i+1])
+                    if sample > 28000: sample = 28000
+                    if sample < -28000: sample = -28000
+                    pcm_clean.append(sample & 0xFF)
+                    pcm_clean.append((sample >> 8) & 0xFF)
             
-        return "HIBA: TTS hiba.", 200
+            # DIGITÁLIS PACKET MEGOLDÁS:
+            # Létrehozunk egy fix, 128 bájtos fejlécet a válasz elején, amibe beleírjuk a tiszta szöveget!
+            # Így az ESP32 ezt beolvassa, a többit pedig egyből küldi a hangszóróra!
+            header_packet = bytearray(128)
+            text_bytes = reply_text.encode('utf-8')[:127]
+            header_packet[:len(text_bytes)] = text_bytes
+            
+            final_payload = header_packet + pcm_clean
+            
+            def generate_chunks():
+                chunk_size = 1024
+                for i in range(0, len(final_payload), chunk_size):
+                    yield bytes(final_payload[i:i+chunk_size])
+            
+            print(f"Kristálytiszta PCM hangstream + Szöveg küldése az ESP32-nek... Méret: {len(final_payload)} bájt.")
+            return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
+            
+        return "HIBA: TTS hiba a Google-nel.", 200
     except Exception as e:
         print(f"Szerver hiba: {str(e)}")
-        return f"HIBA: Szerver hiba: {str(e)}", 200
+        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
