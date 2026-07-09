@@ -120,139 +120,37 @@ def pcm_to_list(pcm):
     return result
 
 
-
-@app.route("/")
-def index():
-
-    return "ESP32 PCM Voice Server OK"
-
-
-
 @app.route("/upload", methods=["POST"])
 def upload():
-
-    if not GEMINI_API_KEY:
-
-        return jsonify({
-            "text":"API kulcs hiba",
-            "audio":[]
-        })
-
 
     try:
 
         pcm_data = request.data
 
+        print("ESP32 hang:", len(pcm_data), "byte")
 
-        print(
-            "ESP32 hang:",
-            len(pcm_data),
-            "byte"
-        )
+        # ... itt van a Gemini rész ...
 
+        pcm = mp3_to_pcm(mp3)
 
-        if len(pcm_data) < 1000:
+        import base64
 
-           import base64
-
-audio_base64 = base64.b64encode(pcm).decode("ascii")
-
-return jsonify({
-    "text": reply,
-    "audio": audio_base64
-})
-            
-
-
-        wav_bytes = pcm_to_wav(
-            pcm_data
-        )
-
-
-        client = genai.Client(
-            api_key=GEMINI_API_KEY.strip()
-        )
-
-
-        audio_part = types.Part.from_bytes(
-            data=wav_bytes,
-            mime_type="audio/wav"
-        )
-
-
-        print(
-            "Gemini STT..."
-        )
-
-
-        response = client.models.generate_content(
-
-            model="gemini-2.5-flash",
-
-            contents=[
-
-                "Hallgasd meg a hangot. "
-                "Válaszolj magyarul röviden.",
-
-                audio_part
-
-            ]
-        )
-
-
-        reply = "Szia Janos, a rendszer mukodik"
-
-
-        print(
-            "Válasz:",
-            reply
-        )
-
-
-        print(
-            "TTS készítés..."
-        )
-
-
-        mp3 = asyncio.run(
-            create_tts(reply)
-        )
-
-
-        print(
-            "PCM átalakítás..."
-        )
-
-
-        pcm = mp3_to_pcm(
-            mp3
-        )
-        pcm = pcm[4000:]
-        pcm = pcm[:48000]
-
-
-        audio_list = pcm_to_list(
-            pcm
-        )
-
-
-        print(
-            "PCM minták:",
-            len(audio_list)
-        )
-
+        audio_base64 = base64.b64encode(pcm).decode("ascii")
 
         return jsonify({
-
-            "text":reply,
-
-            "audio":audio_list
-
-        })
-
+            "text": reply,
+            "audio": audio_base64
+        }), 200
 
 
     except Exception as e:
+
+        print("HIBA:", e)
+
+        return jsonify({
+            "text": "Szerver hiba",
+            "audio": ""
+        }), 200
 
 
         print(
