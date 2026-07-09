@@ -93,7 +93,6 @@ def upload():
             "byte"
         )
 
-
         if not pcm_data:
 
             return jsonify({
