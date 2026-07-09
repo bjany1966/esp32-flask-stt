@@ -2,11 +2,15 @@ import os
 import io
 import wave
 import base64
+import time
 import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
     wav_io = io.BytesIO()
@@ -33,50 +37,52 @@ def process_audio():
 
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
         audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
-
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
 
-        gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
         payload = {
             "contents": [{
                 "parts": [
                     {"text": "Valaszolj magyarul, nagyon roviden, ekezetek nelkul."},
-                    {
-                        "inlineData": {
-                            "mimeType": "audio/wav",
-                            "data": audio_base64
-                        }
-                    }
+                    {"inlineData": {"mimeType": "audio/wav", "data": audio_base64}}
                 ]
             }]
         }
 
         headers = {"Content-Type": "application/json"}
-        gemini_response = requests.post(
-            gemini_url,
-            params={"key": clean_key},
-            json=payload,
-            headers=headers,
-            timeout=25
-        )
 
-        if gemini_response.status_code != 200:
-            return jsonify({
-                "error": "gemini_error",
-                "status_code": gemini_response.status_code,
-                "details": gemini_response.text
-            }), 200
+        last_error = None
+        for attempt in range(3):
+            resp = requests.post(
+                GEMINI_URL,
+                params={"key": clean_key},
+                json=payload,
+                headers=headers,
+                timeout=25
+            )
 
-        res_json = gemini_response.json()
-        reply_text = "rendben"
+            if resp.status_code == 200:
+                res_json = resp.json()
+                reply_text = "rendben"
+                try:
+                    reply_text = res_json["candidates"][0]["content"]["parts"][0].get("text", "rendben").strip()
+                except Exception:
+                    pass
+                return jsonify({"text": reply_text}), 200
 
-        try:
-            reply_text = res_json["candidates"][0]["content"]["parts"][0].get("text", "rendben").strip()
-        except Exception:
-            pass
+            last_error = {
+                "status_code": resp.status_code,
+                "details": resp.text
+            }
+
+            if resp.status_code != 429:
+                break
+
+            time.sleep(1.5 * (attempt + 1))
 
         return jsonify({
-            "text": reply_text
+            "error": "gemini_error",
+            "status_code": last_error["status_code"],
+            "details": last_error["details"]
         }), 200
 
     except Exception as e:
