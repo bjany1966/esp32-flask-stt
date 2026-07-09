@@ -1,15 +1,14 @@
 import os
 import io
-import wave
-import json
-import asyncio
+import base64
 import subprocess
 import tempfile
 
 from flask import Flask, request, jsonify
+from gtts import gTTS
+
 from google import genai
 from google.genai import types
-import edge_tts
 
 
 app = Flask(__name__)
@@ -17,107 +16,65 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 
-# ---------------------------------------------------
-# PCM -> WAV (bejövő ESP32 mikrofon)
-# ---------------------------------------------------
+def pcm_to_base64(mp3_bytes):
+    """
+    MP3 -> 16bit PCM 16000Hz mono
+    """
 
-def pcm_to_wav(pcm_data):
-
-    wav_io = io.BytesIO()
-
-    with wave.open(wav_io, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(16000)
-        wav.writeframes(pcm_data)
-
-    return wav_io.getvalue()
-
-
-
-# ---------------------------------------------------
-# Edge TTS MP3 készítés
-# ---------------------------------------------------
-
-async def create_tts(text):
-
-    mp3_file = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         suffix=".mp3",
-        delete=False
-    )
+        delete=True
+    ) as mp3_file:
 
-    communicate = edge_tts.Communicate(
-        text,
-        voice="hu-HU-TamasNeural"
-    )
-
-    await communicate.save(mp3_file.name)
-
-    return mp3_file.name
+        with tempfile.NamedTemporaryFile(
+            suffix=".raw",
+            delete=True
+        ) as pcm_file:
 
 
-
-# ---------------------------------------------------
-# MP3 -> PCM 16bit mono 16kHz
-# ---------------------------------------------------
-
-def mp3_to_pcm(mp3_path):
-
-    pcm_file = tempfile.NamedTemporaryFile(
-        suffix=".pcm",
-        delete=False
-    )
-
-    command = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        mp3_path,
-        "-f",
-        "s16le",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        pcm_file.name
-    ]
-
-    subprocess.run(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-
-    with open(pcm_file.name, "rb") as f:
-        pcm = f.read()
-
-    return pcm
+            mp3_file.write(mp3_bytes)
+            mp3_file.flush()
 
 
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                mp3_file.name,
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                "-f",
+                "s16le",
+                pcm_file.name
+            ]
 
-# ---------------------------------------------------
-# PCM byte -> JSON lista
-# ---------------------------------------------------
 
-def pcm_to_list(pcm):
-
-    result = []
-
-    for i in range(0, len(pcm), 2):
-
-        if i + 1 < len(pcm):
-
-            sample = int.from_bytes(
-                pcm[i:i+2],
-                byteorder="little",
-                signed=True
+            subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True
             )
 
-            result.append(sample)
 
-    return result
+            pcm_file.seek(0)
+
+            pcm_data = pcm_file.read()
+
+
+    return base64.b64encode(
+        pcm_data
+    ).decode("ascii")
+
+
+
+@app.route("/")
+def index():
+
+    return "ESP32 Gemini Voice Server OK"
+
 
 
 @app.route("/upload", methods=["POST"])
@@ -127,58 +84,183 @@ def upload():
 
         pcm_data = request.data
 
-        print("ESP32 hang:", len(pcm_data), "byte")
 
-        # ... itt van a Gemini rész ...
+        print(
+            "ESP32 hang:",
+            len(pcm_data),
+            "byte"
+        )
 
-        pcm = mp3_to_pcm(mp3)
 
-        import base64
+        if not pcm_data:
 
-        audio_base64 = base64.b64encode(pcm).decode("ascii")
+            return jsonify({
+                "text":"Nincs hang",
+                "audio":""
+            })
+
+
+        if not GEMINI_API_KEY:
+
+            return jsonify({
+                "text":"Hiányzik API kulcs",
+                "audio":""
+            })
+
+
+
+        # WAV készítés Geminihez
+
+        import wave
+
+
+        wav_buffer = io.BytesIO()
+
+
+        with wave.open(
+            wav_buffer,
+            "wb"
+        ) as wav:
+
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+
+            wav.writeframes(
+                pcm_data
+            )
+
+
+        wav_bytes = wav_buffer.getvalue()
+
+
+
+        # Gemini
+
+        client = genai.Client(
+            api_key=GEMINI_API_KEY.strip()
+        )
+
+
+        audio_part = types.Part.from_bytes(
+            data=wav_bytes,
+            mime_type="audio/wav"
+        )
+
+
+        response = client.models.generate_content(
+
+            model="gemini-2.5-flash",
+
+            contents=[
+
+                "Válaszolj magyarul nagyon röviden, maximum 5 szóban.",
+
+                audio_part
+
+            ]
+
+        )
+
+
+        if response.text:
+
+            reply_text = response.text.strip()
+
+        else:
+
+            reply_text = "Rendben"
+
+
+
+        print(
+            "Gemini:",
+            reply_text
+        )
+
+
+
+        # TTS
+
+        tts = gTTS(
+            text=reply_text,
+            lang="hu",
+            slow=False
+        )
+
+
+        mp3_buffer = io.BytesIO()
+
+
+        tts.write_to_fp(
+            mp3_buffer
+        )
+
+
+        mp3_bytes = mp3_buffer.getvalue()
+
+
+
+        print(
+            "MP3 méret:",
+            len(mp3_bytes)
+        )
+
+
+
+        # MP3 -> PCM -> Base64
+
+        audio_base64 = pcm_to_base64(
+            mp3_bytes
+        )
+
+
+        print(
+            "PCM Base64 méret:",
+            len(audio_base64)
+        )
+
+
 
         return jsonify({
-            "text": reply,
+
+            "text": reply_text,
+
             "audio": audio_base64
-        }), 200
+
+        }),200
+
 
 
     except Exception as e:
 
-        print("HIBA:", e)
-
-        return jsonify({
-            "text": "Szerver hiba",
-            "audio": ""
-        }), 200
-
 
         print(
             "HIBA:",
-            e
+            str(e)
         )
 
 
         return jsonify({
 
-            "text":
-            "Szerver hiba",
+            "text":"Szerver hiba",
 
-            "audio":[]
+            "audio":""
 
-        })
+        }),200
 
 
 
 
 if __name__ == "__main__":
 
-    port=int(
+    port = int(
         os.environ.get(
             "PORT",
             5000
         )
     )
+
 
     app.run(
         host="0.0.0.0",
