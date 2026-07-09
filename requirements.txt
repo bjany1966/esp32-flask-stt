@@ -1,5 +1,4 @@
-Flask==3.0.3
-requests==2.32.3
-gunicorn==22.0.0
-google-genai==2.10.0
-gTTS==2.5.4
+flask
+google-genai
+edge-tts
+numpy
