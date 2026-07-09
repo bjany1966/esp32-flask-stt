@@ -62,6 +62,8 @@ def pcm_to_base64(mp3_bytes):
             pcm_file.seek(0)
 
             pcm_data = pcm_file.read()
+            # ESP32 teszthez rövidebb hang
+pcm_data = pcm_data[:32000]
 
 
     return base64.b64encode(
