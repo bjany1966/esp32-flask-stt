@@ -1,85 +1,285 @@
 import os
 import io
 import wave
-import requests
+import json
+import asyncio
+import subprocess
+import tempfile
+
 from flask import Flask, request, jsonify
-from gtts import gTTS
 from google import genai
 from google.genai import types
+import edge_tts
+
 
 app = Flask(__name__)
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
+
+# ---------------------------------------------------
+# PCM -> WAV (bejövő ESP32 mikrofon)
+# ---------------------------------------------------
+
+def pcm_to_wav(pcm_data):
+
     wav_io = io.BytesIO()
-    with wave.open(wav_io, 'wb') as wav_file:
-        wav_file.setnchannels(channels)
-        wav_file.setsampwidth(bits_per_sample // 8)
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm_data)
+
+    with wave.open(wav_io, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(pcm_data)
+
     return wav_io.getvalue()
 
-@app.route('/')
+
+
+# ---------------------------------------------------
+# Edge TTS MP3 készítés
+# ---------------------------------------------------
+
+async def create_tts(text):
+
+    mp3_file = tempfile.NamedTemporaryFile(
+        suffix=".mp3",
+        delete=False
+    )
+
+    communicate = edge_tts.Communicate(
+        text,
+        voice="hu-HU-TamasNeural"
+    )
+
+    await communicate.save(mp3_file.name)
+
+    return mp3_file.name
+
+
+
+# ---------------------------------------------------
+# MP3 -> PCM 16bit mono 16kHz
+# ---------------------------------------------------
+
+def mp3_to_pcm(mp3_path):
+
+    pcm_file = tempfile.NamedTemporaryFile(
+        suffix=".pcm",
+        delete=False
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        mp3_path,
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        pcm_file.name
+    ]
+
+    subprocess.run(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    with open(pcm_file.name, "rb") as f:
+        pcm = f.read()
+
+    return pcm
+
+
+
+# ---------------------------------------------------
+# PCM byte -> JSON lista
+# ---------------------------------------------------
+
+def pcm_to_list(pcm):
+
+    result = []
+
+    for i in range(0, len(pcm), 2):
+
+        if i + 1 < len(pcm):
+
+            sample = int.from_bytes(
+                pcm[i:i+2],
+                byteorder="little",
+                signed=True
+            )
+
+            result.append(sample)
+
+    return result
+
+
+
+@app.route("/")
 def index():
-    return "A sziklaszilárd SDK alapú PCM szám-lista szerver aktív!"
 
-@app.route('/upload', methods=['POST'])
-def process_audio():
-    if not GEMINI_API_KEY: 
-        return jsonify({"text": "HIBA: Hiányzik az API kulcs.", "audio": []}), 200
-        
+    return "ESP32 PCM Voice Server OK"
+
+
+
+@app.route("/upload", methods=["POST"])
+def upload():
+
+    if not GEMINI_API_KEY:
+
+        return jsonify({
+            "text":"API kulcs hiba",
+            "audio":[]
+        })
+
+
     try:
-        pcm_data = request.data
-        if not pcm_data or len(pcm_data) < 1000: 
-            return jsonify({"text": "HIBA: Üres mikrofonhang.", "audio": []}), 200
-            
-        print(f"Mikrofonhang beérkezett az ESP-ről: {len(pcm_data)} bájt. WAV konverzió...")
-        wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
-        
-        # 1. HIVATALOS GOOGLE SDK MEGHÍVÁS (Garantáltan megszünteti a 404-es hibát!)
-        clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
-        client = genai.Client(api_key=clean_key)
-        
-        audio_part = types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav")
 
-        print("Küldés a Google Gemini felé a hivatalos SDK-val...")
+        pcm_data = request.data
+
+
+        print(
+            "ESP32 hang:",
+            len(pcm_data),
+            "byte"
+        )
+
+
+        if len(pcm_data) < 1000:
+
+            return jsonify({
+                "text":"Nincs hang",
+                "audio":[]
+            })
+
+
+        wav_bytes = pcm_to_wav(
+            pcm_data
+        )
+
+
+        client = genai.Client(
+            api_key=GEMINI_API_KEY.strip()
+        )
+
+
+        audio_part = types.Part.from_bytes(
+            data=wav_bytes,
+            mime_type="audio/wav"
+        )
+
+
+        print(
+            "Gemini STT..."
+        )
+
+
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+
+            model="gemini-2.5-flash",
+
             contents=[
-                "Valaszolj a hallott hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!", 
+
+                "Hallgasd meg a hangot. "
+                "Válaszolj magyarul röviden.",
+
                 audio_part
+
             ]
         )
-        
-        reply_text = response.text.strip() if response.text else "Rendben"
-        print(f"Gemini sikeres válasza: {reply_text}")
 
-        # 2. HANGGENERÁLÁS: A gTTS motorral elmentjük a hangot egy belső MP3 memóriapufferbe
-        tts = gTTS(text=reply_text, lang='hu', slow=False)
-        mp3_fp = io.BytesIO()
-        tts.write_to_fp(mp3_fp)
-        mp3_bytes = mp3_fp.getvalue()
 
-        # 3. PURE PYTHON MP3 -> PCM SZŰRŐ TRÜKK:
-        # Kicsomagoljuk az MP3 bájtokat tiszta Little-Endian formázással, normalizálva 
-        # a te ESP kódod JsonArray-e által elvárt előjeles 16 bites PCM szám-listává!
-        audio_list = []
-        for i in range(0, len(mp3_bytes), 2):
-            if i+1 < len(mp3_bytes):
-                sample = int(((mp3_bytes[i+1] & 0x7F) << 8) | mp3_bytes[i])
-                if sample > 30000: sample = 30000
-                audio_list.append(sample if sample <= 32767 else sample - 65536)
+        reply = (
+            response.text.strip()
+            if response.text
+            else "Rendben"
+        )
 
-        print(f"Minden kész! PCM szám-lista összeállítva: {len(audio_list)} minta.")
+
+        print(
+            "Válasz:",
+            reply
+        )
+
+
+        print(
+            "TTS készítés..."
+        )
+
+
+        mp3 = asyncio.run(
+            create_tts(reply)
+        )
+
+
+        print(
+            "PCM átalakítás..."
+        )
+
+
+        pcm = mp3_to_pcm(
+            mp3
+        )
+
+
+        audio_list = pcm_to_list(
+            pcm
+        )
+
+
+        print(
+            "PCM minták:",
+            len(audio_list)
+        )
+
+
         return jsonify({
-            "text": reply_text,
-            "audio": audio_list
-        }), 200
-            
-    except Exception as e:
-        print(f"Súlyos hiba a szerveren: {str(e)}")
-        return jsonify({"text": f"Szerver hiba: {str(e)}", "audio": []}), 200
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+            "text":reply,
+
+            "audio":audio_list
+
+        })
+
+
+
+    except Exception as e:
+
+
+        print(
+            "HIBA:",
+            e
+        )
+
+
+        return jsonify({
+
+            "text":
+            "Szerver hiba",
+
+            "audio":[]
+
+        })
+
+
+
+
+if __name__ == "__main__":
+
+    port=int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
