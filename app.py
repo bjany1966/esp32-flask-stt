@@ -3,6 +3,7 @@ import io
 import wave
 import requests
 from flask import Flask, request, Response, stream_with_context
+import minimp3
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -33,8 +34,6 @@ def process_audio():
 
         # 1. Gemini kérés
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
-        
-        # A hivatalos Google SDK tisztitott meghivasa
         from google import genai
         from google.genai import types
         
@@ -57,18 +56,15 @@ def process_audio():
         if tts_res.status_code == 200:
             mp3_bytes = tts_res.content
             
-            # UNIVERZÁLIS SZOFTVERES PCM TRANSZFORMÁCIÓ:
-            # Az MP3 sűrűség-bájtjait egy tiszta lineáris burkológörbével 
-            # átalakítjuk tömörítetlen, lineáris Mono PCM hullámformává (16000Hz, 16-bit).
-            # Így az ESP32-S3 gyári I2S hardverének NULLA dekódolás kell, nem tud berregni!
-            pcm_clean = bytearray()
-            for i in range(0, len(mp3_bytes), 2):
-                if i+1 < len(mp3_bytes):
-                    sample = int(((mp3_bytes[i] & 0x7F) << 8) | mp3_bytes[i+1])
-                    if sample > 28000: sample = 28000
-                    if sample < -28000: sample = -28000
-                    pcm_clean.append(sample & 0xFF)
-                    pcm_clean.append((sample >> 8) & 0xFF)
+            # JAVÍTVA: Igazi, szoftveres MP3 dekódolás tiszta lineáris PCM-mé!
+            # A minimp3 kicsomagolja az összes MP3 keretet valódi 16-bites Mono hangmintákká!
+            try:
+                mp3_decoder = minimp3.Decoder()
+                # Dekódoljuk az MP3 bájtokat (az API visszatérési értéke: sample_rate, channels, pcm_data)
+                _, _, pcm_clean = mp3_decoder.decode(mp3_bytes)
+            except Exception as dec_e:
+                print(f"Dekodolasi hiba, tartalek mukanak futtatasa: {str(dec_e)}")
+                pcm_clean = b'\x00' * 16000 # Tartalék csend hiba esetére
             
             # DARABOLT GENERÁTOR FÜGGVÉNY AZ ESP SZÁMÁRA
             def generate_chunks():
@@ -76,7 +72,7 @@ def process_audio():
                 for i in range(0, len(pcm_clean), chunk_size):
                     yield bytes(pcm_clean[i:i+chunk_size])
             
-            print(f"Tiszta, darabolt PCM hangstream inditasa az ESP32-nek, teljes meret: {len(pcm_clean)} bajt.")
+            print(f"Kristálytiszta, valódi PCM hangstream indítása az ESP32-nek... Méret: {len(pcm_clean)} bájt.")
             return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
             
         return "HIBA: TTS hiba a Google-nel.", 200
