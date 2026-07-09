@@ -153,10 +153,15 @@ def upload():
 
         if len(pcm_data) < 1000:
 
-            return jsonify({
-                "text":"Nincs hang",
-                "audio":[]
-            })
+           import base64
+
+audio_base64 = base64.b64encode(pcm).decode("ascii")
+
+return jsonify({
+    "text": reply,
+    "audio": audio_base64
+})
+            
 
 
         wav_bytes = pcm_to_wav(
@@ -223,6 +228,7 @@ def upload():
             mp3
         )
         pcm = pcm[4000:]
+        pcm = pcm[:48000]
 
 
         audio_list = pcm_to_list(
