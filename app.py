@@ -222,7 +222,7 @@ def upload():
         pcm = mp3_to_pcm(
             mp3
         )
-        pcm = pcm[:60000]
+        pcm = pcm[4000:]
 
 
         audio_list = pcm_to_list(
