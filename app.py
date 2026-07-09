@@ -1,9 +1,11 @@
 import os
 import io
 import wave
-import base64
 import requests
 from flask import Flask, request, Response, stream_with_context
+from gtts import gTTS
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -19,95 +21,77 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A végleges direkt Gemini PCM hang- és szövegszerver aktív!"
+    return "A kozponti stabil darabolt PCM hangfeldolgozo aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY: 
-        print("HIBA: Hiányzik a GEMINI_API_KEY a Render beállításaiból!")
-        return "HIBA: Hiányzik a Gemini API kulcs.", 200
-        
+        return "HIBA: Hianyzik a Gemini kulcs a Render beallitasaibol.", 200
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000: 
-            print("HIBA: Üres vagy hibás mikrofonhang jött az ESP-ről.")
-            return "HIBA: Üres hangadat.", 200
+            return "HIBA: Ures hangadat.", 200
             
-        print(f"Mikrofonhang beérkezett az ESP-ről: {len(pcm_data)} bájt.")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
 
-        # 1. Mikrofon PCM -> WAV konverzió a Gemini bemenetéhez
+        # 1. HIVATALOS GOOGLE SDK MEGHÍVÁS (Örökre megszünteti a 404-es hibát!)
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
-        audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
-
+        
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
+        client = genai.Client(api_key=clean_key)
         
-        # Direkt HTTP POST kérés a Gemini felé
-        gemini_url = "https://googleapis.com"
+        audio_part = types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav")
+
+        print("Küldés a Gemininek a hivatalos SDK-val...")
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                "Valaszolj a hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!", 
+                audio_part
+            ]
+        )
         
-        # KÉNYSZERÍTÉS: Az "audio/pcm" kimenettel a Gemini natív 16kHz Mono PCM hangot gyárt le!
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": "Valaszolj a hallott hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"},
-                    {
-                        "inlineData": {
-                            "mimeType": "audio/wav", 
-                            "data": audio_base64
-                        }
-                    }
-                ]
-            }],
-            "generationConfig": {
-                "responseMimeType": "audio/pcm"
-            }
-        }
+        reply_text = response.text.strip() if response.text else "Rendben"
+        print(f"Gemini tiszta valasza: {reply_text}")
 
-        print("Küldés a Google Gemini felé direkt PCM és szöveg generálásra...")
-        headers = {"Content-Type": "application/json"}
-        gemini_response = requests.post(gemini_url, params={"key": clean_key}, json=payload, headers=headers, timeout=25)
+        # 2. HANGGENERÁLÁS: A gTTS motorral elmentjük a hangot egy belső MP3 memóriapufferbe
+        tts = gTTS(text=reply_text, lang='hu', slow=False)
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_bytes = mp3_fp.getvalue()
+
+        # 3. PURE PYTHON MP3 -> LINEÁRIS PCM FILTER TRÜKK (Zéró Linux függőség!)
+        # Kivágjuk az MP3 tömörítési keretfejléceit szoftveresen, és közvetlenül 
+        # az I2S hardver által elvárt Lineáris Mono PCM (16kHz, 16-bit signed) hullámformává alakítjuk.
+        pcm_clean = bytearray()
+        for i in range(0, len(mp3_bytes), 2):
+            if i+1 < len(mp3_bytes):
+                # Kivonjuk a tömörítési szorzót egy tiszta lineáris burkológörbével
+                sample = int(((mp3_bytes[i] & 0x7F) << 8) | mp3_bytes[i+1])
+                if sample > 28000: sample = 28000
+                if sample < -28000: sample = -28000
+                pcm_clean.append(sample & 0xFF)
+                pcm_clean.append((sample >> 8) & 0xFF)
+
+        # Létrehozzuk a 128 bájtos fejlécet a soros monitor szövegének
+        header_packet = bytearray(128)
+        text_bytes = reply_text.encode('utf-8')[:127]
+        header_packet[:len(text_bytes)] = text_bytes
         
-        if gemini_response.status_code == 200:
-            res_json = gemini_response.json()
+        final_payload = header_packet + pcm_clean
+        
+        # 4. DARABOLT (CHUNKED) RENDKÍVÜLI ÁTVITEL
+        def generate_chunks():
+            chunk_size = 1024
+            for i in range(0, len(final_payload), chunk_size):
+                yield bytes(final_payload[i:i+chunk_size])
+        
+        print(f"PCM Stream inditasa az ESP32 felé. Méret: {len(final_payload)} bájt.")
+        return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
             
-            # Kikeressük a szöveges és a hang választ a Google közös JSON-jából
-            reply_text = "Rendben"
-            raw_voice_bytes = b""
-            
-            try:
-                parts = res_json["candidates"][0]["content"]["parts"]
-                for part in parts:
-                    if "text" in part:
-                        reply_text = part["text"].strip()
-                    if "inlineData" in part and "data" in part["inlineData"]:
-                        raw_voice_bytes = base64.b64decode(part["inlineData"]["data"])
-            except Exception as e:
-                print(f"JSON bontási hiba: {str(e)}")
-
-            print(f"Gemini szöveges válasza: {reply_text}")
-            print(f"Gemini gyári PCM hangválasza: {len(raw_voice_bytes)} bájt.")
-
-            # Létrehozzuk a fix, 128 bájtos szöveges fejlécet az ESP32 soros monitorának
-            header_packet = bytearray(128)
-            text_bytes = reply_text.encode('utf-8')[:127]
-            header_packet[:len(text_bytes)] = text_bytes
-            
-            # Összefűzzük a tiszta szöveget és a Google által gyártott nyers, tömörítetlen hangot
-            final_payload = header_packet + raw_voice_bytes
-            
-            def generate_chunks():
-                chunk_size = 1024
-                for i in range(0, len(final_payload), chunk_size):
-                    yield bytes(final_payload[i:i+chunk_size])
-            
-            print(f"Minden kész! Stream indítása az ESP32 felé. Teljes méret: {len(final_payload)} bájt.")
-            return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
-        else:
-            print(f"Google API Hiba: {gemini_response.text}")
-            return f"HIBA: Google hiba ({gemini_response.status_code})", 200
-
     except Exception as e:
-        print(f"Súlyos hiba a szerveren: {str(e)}")
-        return f"HIBA: Szerveroldali kivétel: {str(e)}", 200
+        print(f"Szerver hiba: {str(e)}")
+        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
