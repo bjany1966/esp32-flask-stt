@@ -1,8 +1,9 @@
 import os
 import io
+import wave
 import base64
-import subprocess
 import tempfile
+import subprocess
 
 from flask import Flask, request, jsonify
 from gtts import gTTS
@@ -16,19 +17,27 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 
-def pcm_to_base64(mp3_bytes):
-    """
-    MP3 -> 16bit PCM 16000Hz mono
-    """
+def wav_from_pcm(pcm_data):
+    wav_io = io.BytesIO()
+
+    with wave.open(wav_io, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(pcm_data)
+
+    return wav_io.getvalue()
+
+
+
+def mp3_to_pcm(mp3_bytes):
 
     with tempfile.NamedTemporaryFile(
-        suffix=".mp3",
-        delete=True
+        suffix=".mp3"
     ) as mp3_file:
 
         with tempfile.NamedTemporaryFile(
-            suffix=".raw",
-            delete=True
+            suffix=".pcm"
         ) as pcm_file:
 
 
@@ -53,29 +62,28 @@ def pcm_to_base64(mp3_bytes):
 
             subprocess.run(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 check=True
             )
 
 
             pcm_file.seek(0)
 
-            pcm_data = pcm_file.read()
-            # ESP32 teszthez rövidebb hang
-pcm_data = pcm_data[:32000]
+            pcm = pcm_file.read()
 
 
-    return base64.b64encode(
-        pcm_data
-    ).decode("ascii")
+    # ESP32 memória miatt rövidítjük
+    pcm = pcm[:32000]
+
+    return pcm
 
 
 
 @app.route("/")
-def index():
+def home():
 
-    return "ESP32 Gemini Voice Server OK"
+    return "ESP32 Voice Server OK"
 
 
 
@@ -84,62 +92,33 @@ def upload():
 
     try:
 
-        pcm_data = request.data
+        pcm_input = request.data
 
 
         print(
             "ESP32 hang:",
-            len(pcm_data),
+            len(pcm_input),
             "byte"
         )
 
-        if not pcm_data:
+
+        if len(pcm_input) < 1000:
 
             return jsonify({
-                "text":"Nincs hang",
-                "audio":""
+                "text": "Nincs hang",
+                "audio": ""
             })
 
 
-        if not GEMINI_API_KEY:
-
-            return jsonify({
-                "text":"Hiányzik API kulcs",
-                "audio":""
-            })
-
-
-
-        # WAV készítés Geminihez
-
-        import wave
-
-
-        wav_buffer = io.BytesIO()
-
-
-        with wave.open(
-            wav_buffer,
-            "wb"
-        ) as wav:
-
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(16000)
-
-            wav.writeframes(
-                pcm_data
-            )
-
-
-        wav_bytes = wav_buffer.getvalue()
-
-
-
-        # Gemini
+        # Gemini kliens
 
         client = genai.Client(
             api_key=GEMINI_API_KEY.strip()
+        )
+
+
+        wav_bytes = wav_from_pcm(
+            pcm_input
         )
 
 
@@ -155,7 +134,7 @@ def upload():
 
             contents=[
 
-                "Válaszolj magyarul nagyon röviden, maximum 5 szóban.",
+                "Válaszolj magyarul röviden maximum öt szóban.",
 
                 audio_part
 
@@ -166,32 +145,29 @@ def upload():
 
         if response.text:
 
-            reply_text = response.text.strip()
+            answer = response.text.strip()
 
         else:
 
-            reply_text = "Rendben"
-
+            answer = "Rendben"
 
 
         print(
             "Gemini:",
-            reply_text
+            answer
         )
-
 
 
         # TTS
 
         tts = gTTS(
-            text=reply_text,
+            text=answer,
             lang="hu",
             slow=False
         )
 
 
         mp3_buffer = io.BytesIO()
-
 
         tts.write_to_fp(
             mp3_buffer
@@ -201,36 +177,46 @@ def upload():
         mp3_bytes = mp3_buffer.getvalue()
 
 
-
         print(
-            "MP3 méret:",
-            len(mp3_bytes)
+            "MP3:",
+            len(mp3_bytes),
+            "byte"
         )
 
 
 
-        # MP3 -> PCM -> Base64
+        # MP3 -> PCM
 
-        audio_base64 = pcm_to_base64(
+        pcm_output = mp3_to_pcm(
             mp3_bytes
         )
 
 
         print(
-            "PCM Base64 méret:",
-            len(audio_base64)
+            "PCM:",
+            len(pcm_output),
+            "byte"
         )
 
+
+        audio64 = base64.b64encode(
+            pcm_output
+        ).decode("ascii")
+
+
+        print(
+            "Base64:",
+            len(audio64)
+        )
 
 
         return jsonify({
 
-            "text": reply_text,
+            "text": answer,
 
-            "audio": audio_base64
+            "audio": audio64
 
-        }),200
-
+        })
 
 
     except Exception as e:
@@ -244,12 +230,11 @@ def upload():
 
         return jsonify({
 
-            "text":"Szerver hiba",
+            "text": "Szerver hiba",
 
-            "audio":""
+            "audio": ""
 
-        }),200
-
+        })
 
 
 
