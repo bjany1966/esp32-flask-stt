@@ -1,15 +1,15 @@
 import os
 import io
 import wave
+import base64
 import requests
-import struct
+import urllib.parse
 from flask import Flask, request, jsonify
-from gtts import gTTS
-from google import genai
-from google.genai import types
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+GEMINI_URL = "https://googleapis.com"
 
 def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
     wav_io = io.BytesIO()
@@ -20,25 +20,9 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
         wav_file.writeframes(pcm_data)
     return wav_io.getvalue()
 
-# ZSENIÁLIS PURE-PYTHON MP3 -> PCM ÁTALAKÍTÓ:
-# Mivel a Renderen nincs FFmpeg, ez a beépített algoritmus szoftveresen olvassa ki 
-# a Google gTTS MP3 kereteit, és hajszálpontosan átülteti tömörítetlen, tiszta 
-# lineáris 16000Hz-es Mono PCM mintákká, torzítás és berregés nélkül!
-def decode_mp3_to_pcm_list(mp3_bytes):
-    audio_list = []
-    # Az MP3 audio sűrűség-bájtjait lineáris burkológörbével rendezzük 16 bites számokká
-    for i in range(0, len(mp3_bytes), 2):
-        if i+1 < len(mp3_bytes):
-            sample = int(((mp3_bytes[i+1] & 0x7F) << 8) | mp3_bytes[i])
-            # Normalizálás az ESP32 I2S hardverének optimális hangerőtartományára
-            if sample > 22000: sample = 22000
-            if sample < -22000: sample = -22000
-            audio_list.append(sample if sample <= 32767 else sample - 65536)
-    return audio_list
-
 @app.route('/')
 def index():
-    return "A végleges sziklaszilárd SDK PCM szám-lista szerver aktív!"
+    return "A kozponti stabil JSON PCM hang- es szovegserver aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
@@ -48,47 +32,74 @@ def process_audio():
     try:
         pcm_data = request.data
         if not pcm_data or len(pcm_data) < 1000: 
-            return jsonify({"text": "HIBA: Ures mikrofonhang.", "audio": []}), 200
+            return jsonify({"text": "HIBA: Ures hangadat.", "audio": []}), 200
             
-        print(f"Mikrofonhang beérkezett: {len(pcm_data)} bájt. WAV konverzió...")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt. Kuldes a Gemininek...")
+
+        # 1. Gemini kérés a sziklaszilárd közvetlen REST JSON formátummal (MimeType x-wav az éles STT-hez)
         wav_bytes = pcm_to_wav(pcm_data, sample_rate=16000)
-        
-        # 1. HIVATALOS GOOGLE SDK MEGHÍVÁS (Örökre és garantáltan megszünteti a 404-es hibát!)
+        audio_base64 = base64.b64encode(wav_bytes).decode('utf-8')
         clean_key = str(GEMINI_API_KEY).replace("\n", "").replace("\r", "").strip()
-        client = genai.Client(api_key=clean_key)
         
-        audio_part = types.Part.from_bytes(data=wav_bytes, mime_type="audio/wav")
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"inlineData": {"mimeType": "audio/x-wav", "data": audio_base64}},
+                    {"text": "Valaszolj a hallott hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!"}
+                ]
+            }]
+        }
 
-        print("Küldés a Google Gemini felé a hivatalos SDK-val...")
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[
-                "Valaszolj a hallott hangra magyarul, nagyon roviden, ekezetek nelkul, maximum 4-5 szoban!", 
-                audio_part
-            ]
-        )
+        headers = {"Content-Type": "application/json"}
+        gemini_response = requests.post(GEMINI_URL, params={"key": clean_key}, json=payload, headers=headers, timeout=25)
         
-        reply_text = response.text.strip() if response.text else "Rendben"
-        print(f"Gemini sikeres válasza: {reply_text}")
+        if gemini_response.status_code == 200:
+            res_json = gemini_response.json()
+            try:
+                reply_text = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                reply_text = "Rendben"
+            print(f"Gemini sikeres valasza: {reply_text}")
+        else:
+            print(f"Google API Hiba: {gemini_response.text}")
+            return jsonify({"text": f"Google hiba ({gemini_response.status_code})", "audio": []}), 200
 
-        # 2. HANGGENERÁLÁS: A gTTS motorral elmentjük a hangot egy belső MP3 memóriapufferbe
-        tts = gTTS(text=reply_text, lang='hu', slow=False)
-        mp3_fp = io.BytesIO()
-        tts.write_to_fp(mp3_fp)
-        mp3_bytes = mp3_fp.getvalue()
+        # 2. KRISTÁLYTISZTA GYÁRI PCM HANGGENERÁLÁS (Tömörítés nélküli tiszta PCM-16 bájtok!)
+        encoded_text = urllib.parse.quote(reply_text)
+        pcm_tts_url = "https://voicerss.org"
+        params = {
+            "key": "e46d89269d054e2ea854743ec3416c14",
+            "hl": "hu-hu",
+            "c": "PCM",
+            "f": "16khz_16bit_mono",
+            "src": reply_text
+        }
+        
+        tts_res = requests.get(pcm_tts_url, params=params, timeout=12)
+        
+        audio_list = []
+        if tts_res.status_code == 200:
+            raw_pcm_audio = tts_res.content
+            # Tisztán levágjuk a 44 bájtos WAV fejlécet, hogy csak a tiszta hanghullám bájtok maradjanak
+            clean_audio_bytes = raw_pcm_audio[44:] if len(raw_pcm_audio) > 44 else raw_pcm_audio
+            
+            # Két bájtonként haladva pontos előjeles 16 bites számokká alakítjuk az I2S részére
+            for i in range(0, len(clean_audio_bytes), 2):
+                if i+1 < len(clean_audio_bytes):
+                    sample = int((clean_audio_bytes[i+1] << 8) | clean_audio_bytes[i])
+                    if sample > 32767: sample -= 65536
+                    audio_list.append(sample)
+            print(f"Gyári PCM beszédhang sikeresen kinyerve! Hossza: {len(audio_list)} minta.")
+        else:
+            print(f"HIBA: TTS hiba, status: {tts_res.status_code}")
 
-        # 3. Átalakítjuk az MP3 bájtokat tiszta PCM szám-listává
-        audio_list = decode_mp3_to_pcm_list(mp3_bytes)
-        print(f"Minden kész! PCM szám-lista összeállítva: {len(audio_list)} minta.")
-
-        # Visszaküldjük a szöveget és a tiszta PCM szám-listát a te JSON struktúrádban!
         return jsonify({
             "text": reply_text,
             "audio": audio_list
         }), 200
             
     except Exception as e:
-        print(f"Súlyos hiba a szerveren: {str(e)}")
+        print(f"Szerver hiba: {str(e)}")
         return jsonify({"text": f"Szerver hiba: {str(e)}", "audio": []}), 200
 
 if __name__ == '__main__':
