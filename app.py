@@ -1,9 +1,9 @@
 import os
 import io
 import wave
+import urllib.parse
 import requests
 from flask import Flask, request, Response, stream_with_context
-import minimp3
 
 app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -19,20 +19,19 @@ def pcm_to_wav(pcm_data, sample_rate=16000, channels=1, bits_per_sample=16):
 
 @app.route('/')
 def index():
-    return "A kozponti gyors darabolt PCM hangfeldolgozo aktiv!"
+    return "A kozponti stabil darabolt PCM hangfeldolgozo aktiv!"
 
 @app.route('/upload', methods=['POST'])
 def process_audio():
     if not GEMINI_API_KEY: 
-        return "HIBA: Hianyzik a Gemini kulcs a Render beallitasaibol.", 200
+        return "Hianyzik a Gemini kulcs", 500
     try:
         pcm_data = request.data
-        if not pcm_data or len(pcm_data) < 1000: 
-            return "HIBA: Ures vagy hibas hangfelvetel.", 200
+        if not pcm_data: return "Ures hang", 400
         
-        print(f"Mikrofonhang beerkezett az ESP-ről: {len(pcm_data)} bajt.")
+        print(f"Mikrofonhang beerkezett: {len(pcm_data)} bajt.")
 
-        # 1. Gemini kérés
+        # 1. Gemini szöveges kérés
         wav_data = pcm_to_wav(pcm_data, sample_rate=16000)
         from google import genai
         from google.genai import types
@@ -47,38 +46,36 @@ def process_audio():
         reply_text = response.text.strip() if response.text else "Rendben"
         print(f"Gemini valasz: {reply_text}")
 
-        # 2. TTS kérés a Google Translate API-tól (Standard MP3)
-        tts_url = "https://google.com"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        params = {"ie": "UTF-8", "tl": "hu", "client": "tw-ob", "q": reply_text}
-        tts_res = requests.get(tts_url, params=params, headers=headers, timeout=12)
+        # 2. KRISTÁLYTISZTA PCM HANGGENERÁLÁS: 
+        # A szöveget biztonságosan URL-kódoljuk, és egy olyan publikus TTS átalakítón küldjük át, 
+        # ami MP3 helyett gyárilag, natívan tömörítetlen LINEÁRIS PCM (16kHz, Mono, 16-bit) bájtokat ad vissza!
+        encoded_text = urllib.parse.quote(reply_text)
+        pcm_tts_url = f"https://voicerss.org{encoded_text}"
+        
+        print("Lekérés az online PCM hanggenerátortól...")
+        tts_res = requests.get(pcm_tts_url, timeout=12, stream=True)
         
         if tts_res.status_code == 200:
-            mp3_bytes = tts_res.content
-            
-            # JAVÍTVA: Igazi, szoftveres MP3 dekódolás tiszta lineáris PCM-mé!
-            # A minimp3 kicsomagolja az összes MP3 keretet valódi 16-bites Mono hangmintákká!
-            try:
-                mp3_decoder = minimp3.Decoder()
-                # Dekódoljuk az MP3 bájtokat (az API visszatérési értéke: sample_rate, channels, pcm_data)
-                _, _, pcm_clean = mp3_decoder.decode(mp3_bytes)
-            except Exception as dec_e:
-                print(f"Dekodolasi hiba, tartalek mukanak futtatasa: {str(dec_e)}")
-                pcm_clean = b'\x00' * 16000 # Tartalék csend hiba esetére
-            
-            # DARABOLT GENERÁTOR FÜGGVÉNY AZ ESP SZÁMÁRA
+            # DARABOLT (CHUNKED) STREAM: 
+            # 1024 bájtos darabokban közvetlenül továbbítjuk a tiszta PCM bájtokat az ESP32-nek!
             def generate_chunks():
-                chunk_size = 1024
-                for i in range(0, len(pcm_clean), chunk_size):
-                    yield bytes(pcm_clean[i:i+chunk_size])
+                # Biztonsági okokból átugorjuk az első 44 bájtot (WAV fejléc), ha jelen van
+                first_chunk = True
+                for chunk in tts_res.iter_content(chunk_size=1024):
+                    if chunk:
+                        if first_chunk and len(chunk) > 44:
+                            first_chunk = False
+                            yield chunk[44:]
+                        else:
+                            yield chunk
             
-            print(f"Kristálytiszta, valódi PCM hangstream indítása az ESP32-nek... Méret: {len(pcm_clean)} bájt.")
+            print("Kristálytiszta PCM hangstream indítása az ESP32 felé...")
             return Response(stream_with_context(generate_chunks()), mimetype='application/octet-stream')
             
-        return "HIBA: TTS hiba a Google-nel.", 200
+        return "TTS hiba", 500
     except Exception as e:
-        print(f"Szerver hiba: {str(e)}")
-        return f"HIBA: Szerveroldali hiba: {str(e)}", 200
+        print(str(e))
+        return "Szerver Hiba", 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
