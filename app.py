@@ -130,7 +130,7 @@ def upload():
 
             contents=[
 
-                "Válaszolj magyarul maximum egy rövid mondatban. Ne magyarázz."
+                "Válaszolj magyarul maximum egy rövid mondatban. Ne magyarázz.",
 
                 audio_part
 
