@@ -71,6 +71,7 @@ def mp3_to_pcm(mp3_bytes):
             pcm_file.seek(0)
 
             pcm = pcm_file.read()
+            pcm = pcm[:160000]
 
     return pcm
 
