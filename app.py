@@ -72,10 +72,6 @@ def mp3_to_pcm(mp3_bytes):
 
             pcm = pcm_file.read()
 
-
-    # ESP32 memória miatt rövidítjük
-    pcm = pcm[:32000]
-
     return pcm
 
 
@@ -134,7 +130,7 @@ def upload():
 
             contents=[
 
-                "Válaszolj magyarul röviden maximum öt szóban.",
+                "Válaszolj magyarul röviden, maximum két mondatban. Hangasszisztens vagy.",
 
                 audio_part
 
