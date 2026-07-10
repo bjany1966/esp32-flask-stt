@@ -71,7 +71,7 @@ def mp3_to_pcm(mp3_bytes):
             pcm_file.seek(0)
 
             pcm = pcm_file.read()
-            pcm = pcm[:64000]
+            pcm = pcm[:24000]
 
     return pcm
 
@@ -143,6 +143,7 @@ def upload():
         if response.text:
 
             answer = response.text.strip()
+            answer = answer[:60]
 
         else:
 
