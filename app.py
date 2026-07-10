@@ -71,7 +71,7 @@ def mp3_to_pcm(mp3_bytes):
             pcm_file.seek(0)
 
             pcm = pcm_file.read()
-            pcm = pcm[:40000]
+            pcm = pcm[:32000]
 
     return pcm
 
@@ -131,7 +131,7 @@ def upload():
 
             contents=[
 
-                "Válaszolj magyarul maximum egy rövid mondatban. Ne magyarázz.",
+                "Válaszolj magyarul nagyon röviden, maximum 3-4 szóban.",
 
                 audio_part
 
